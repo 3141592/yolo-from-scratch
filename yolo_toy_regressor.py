@@ -107,7 +107,7 @@ if __name__ == "__main__":
 
     model = make_model()
     model.compile(optimizer='adam', loss='mse')
-    model.fit(X_tr, Y_tr, validation_data=(X_va, Y_va), epochs=50, batch_size=16)
+    model.fit(X_tr, Y_tr, validation_data=(X_va, Y_va), epochs=20, batch_size=16)
 
     # evaluate IoU on validation
     preds = model.predict(X_va)
