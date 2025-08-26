@@ -47,9 +47,11 @@ print("H, W", H , ", ", W)
 np.unique(mask)
 print("np.unique(mask): ", np.unique(mask))
 
+vals, counts = np.unique(mask, return_counts=True)
+print(dict(zip(vals, counts)))
 
-present = np.unique(mask)
+#present = np.unique(mask)
 
 
-present = present[(present > 0) & (present < 255)]
+#present = present[(present > 0) & (present < 255)]
 
