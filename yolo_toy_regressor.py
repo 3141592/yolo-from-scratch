@@ -58,11 +58,11 @@ def iou_xywh(pred, gt):
 
 # --- small dataset loader (replace with your parquet loader) ---
 def get_samples_from_dataset(dataset, max_samples=500):
-    X = []  # images resized to 224x224
+    X = []  # images resized to 448x448
     Y = []  # box targets [xc,yc,w,h] normalized
     for i, ex in enumerate(dataset):
         if i >= max_samples: break
-        img = Image.open(BytesIO(ex["image"]["bytes"])).convert("RGB").resize((224,224))
+        img = Image.open(BytesIO(ex["image"]["bytes"])).convert("RGB").resize((448,448))
         mask_boxes = mask_bytes_to_boxes(ex["mask"]["bytes"])
         if not mask_boxes:
             continue
@@ -79,9 +79,9 @@ def get_samples_from_dataset(dataset, max_samples=500):
     return X, Y
 
 # --- tiny model ---
-def make_model(input_shape=(224,224,3)):
+def make_model(input_shape=(448,448,3)):
     inp = layers.Input(shape=input_shape)
-    x = layers.Conv2D(16,3,activation='relu',padding='same')(inp)
+    x = layers.Conv2D(64,7, strides=(2,2),activation='relu',padding='same')(inp)
     x = layers.MaxPool2D(2)(x)
     x = layers.Conv2D(32,3,activation='relu',padding='same')(x)
     x = layers.MaxPool2D(2)(x)
