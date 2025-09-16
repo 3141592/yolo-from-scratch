@@ -1,6 +1,7 @@
 # yolo_toy_regressor.py — minimal single-box regressor
 from datasets import load_dataset
 import numpy as np
+import sys
 from PIL import Image
 from io import BytesIO
 import tensorflow as tf
@@ -81,8 +82,8 @@ def get_samples_from_dataset(dataset, max_samples=500):
 # --- tiny model ---
 def make_model(input_shape=(448,448,3)):
     inp = layers.Input(shape=input_shape)
-    x = layers.Conv2D(64,7, strides=(2,2),activation='relu',padding='same')(inp)
-    x = layers.MaxPool2D(2)(x)
+    x = layers.Conv2D(192,7, strides=(2,2),activation='relu',padding='same')(inp)
+    x = layers.MaxPool2D(pool_size=(2, 2), strides=2)(x)
     x = layers.Conv2D(32,3,activation='relu',padding='same')(x)
     x = layers.MaxPool2D(2)(x)
     x = layers.Conv2D(64,3,activation='relu',padding='same')(x)
@@ -107,6 +108,8 @@ if __name__ == "__main__":
 
     model = make_model()
     model.compile(optimizer='adam', loss='mse')
+    model.summary()
+    #sys.exit()
     model.fit(X_tr, Y_tr, validation_data=(X_va, Y_va), epochs=20, batch_size=16)
 
     # evaluate IoU on validation
