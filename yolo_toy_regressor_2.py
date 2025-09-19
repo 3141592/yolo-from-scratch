@@ -9,6 +9,20 @@ from tensorflow.keras import layers, models
 from skimage.measure import label, regionprops
 import matplotlib.pyplot as plt
 
+# Quiet loggin
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"  # 0=all, 1=hide INFO, 2=hide WARNING, 3=hide ERROR (not recommended)
+
+# Manage gpu mem use
+import tensorflow as tf, os
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+gpus = tf.config.list_physical_devices('GPU')
+for g in gpus:
+    tf.config.experimental.set_memory_growth(g, True)
+
+from tensorflow.keras import mixed_precision
+mixed_precision.set_global_policy('mixed_float16')
+
 # --- helpers (adapt to your pipeline) ---
 def mask_bytes_to_boxes(mask_bytes):
     im = Image.open(BytesIO(mask_bytes))
@@ -79,6 +93,29 @@ def get_samples_from_dataset(dataset, max_samples=500):
     Y = np.stack(Y)
     return X, Y
 
+# --- custom IoU metric ---
+def iou_metric(y_true, y_pred):
+    # y_true, y_pred: (batch, 4) in [xc, yc, w, h] normalized
+    # convert to xyxy
+    xcycwh_to_xyxy = lambda t: tf.stack([
+        t[...,0] - 0.5*t[...,2],  # x_min
+        t[...,1] - 0.5*t[...,3],  # y_min
+        t[...,0] + 0.5*t[...,2],  # x_max
+        t[...,1] + 0.5*t[...,3],  # y_max
+    ], axis=-1)
+    p = xcycwh_to_xyxy(y_pred)
+    g = xcycwh_to_xyxy(y_true)
+    inter_mins = tf.maximum(p[...,:2], g[...,:2])
+    inter_maxs = tf.minimum(p[...,2:], g[...,2:])
+    inter_wh   = tf.maximum(inter_maxs - inter_mins, 0.0)
+    inter_area = inter_wh[...,0] * inter_wh[...,1]
+    pred_area  = (p[...,2]-p[...,0]) * (p[...,3]-p[...,1])
+    gt_area    = (g[...,2]-g[...,0]) * (g[...,3]-g[...,1])
+    union      = pred_area + gt_area - inter_area
+    iou        = tf.where(union > 0, inter_area / union, tf.zeros_like(union))
+    return tf.reduce_mean(iou)
+
+
 # --- tiny model ---
 def make_model(input_shape=(448,448,3)):
     # Input Layer
@@ -121,7 +158,7 @@ def make_model(input_shape=(448,448,3)):
     # Layer 6
     x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dense(128, activation='relu')(x)
-    out = layers.Dense(4, activation='sigmoid')(x)  # normalized outputs in [0,1]
+    out = layers.Dense(4, activation='sigmoid', dtype='float32')(x)
     return models.Model(inp, out)
 
 # --- train & eval (example) ---
@@ -139,10 +176,72 @@ if __name__ == "__main__":
     X_va, Y_va = X[idx:], Y[idx:]
 
     model = make_model()
-    model.compile(optimizer='adam', loss='mse')
+
+    # --- replace your compile() line and add this above model.fit() ---
+    import tensorflow as tf
+    try:
+        import tensorflow_addons as tfa
+        # Decoupled weight decay (closer to “weight decay 5e-4” in the paper)
+        optimizer = tfa.optimizers.SGDW(
+            learning_rate=1e-3,  # will be overridden by the scheduler each epoch
+            weight_decay=5e-4,
+            momentum=0.9,
+            nesterov=False,
+        )
+    except Exception:
+        # Fallback: standard SGD with L2 via 'weight_decay' if available in your TF/Keras;
+        # if not, you can add kernel_regularizer=... on layers instead.
+        optimizer = tf.keras.optimizers.SGD(learning_rate=1e-3, momentum=0.9)
+
+    # YOLOv1-style LR schedule (warmup -> 1e-2 -> 1e-3 -> 1e-4), totalling ~135 epochs.
+    TOTAL_EPOCHS = 10
+    WARMUP_EPOCHS = 3  # small warmup from 1e-3 up to 1e-2
+
+    def yolo_v1_lr_schedule(epoch):
+        if epoch < WARMUP_EPOCHS:
+            # linear warmup 1e-3 -> 1e-2
+            return 1e-3 + (1e-2 - 1e-3) * (epoch + 1) / max(1, WARMUP_EPOCHS)
+        elif epoch < WARMUP_EPOCHS + 75:
+            return 1e-2
+        elif epoch < WARMUP_EPOCHS + 75 + 30:
+            return 1e-3
+        else:
+            return 1e-4
+
+    class ValIoUCallback(tf.keras.callbacks.Callback):
+        def __init__(self, X_val, Y_val, every=1, name='val_iou'):
+            super().__init__()
+            self.X_val = X_val
+            self.Y_val = Y_val
+            self.every = every
+            self.name = name
+
+        def on_epoch_end(self, epoch, logs=None):
+            if (epoch + 1) % self.every != 0:
+                return
+            preds = self.model.predict(self.X_val, verbose=0)
+            ious = [iou_xywh(p, g) for p, g in zip(preds, self.Y_val)]
+            val_iou = float(np.mean(ious))
+            # add to logs so it shows in History & can be monitored
+            logs = logs or {}
+            logs[self.name] = val_iou
+            print(f"\nEpoch {epoch+1}: {self.name}={val_iou:.4f}")
+
+    lr_cb = tf.keras.callbacks.LearningRateScheduler(yolo_v1_lr_schedule, verbose=1)
+
+    model.compile(optimizer=optimizer, loss='mse', metrics=[iou_metric])
     model.summary()
     #sys.exit()
-    model.fit(X_tr, Y_tr, validation_data=(X_va, Y_va), epochs=17, batch_size=16)
+
+    val_iou_cb = ValIoUCallback(X_va, Y_va, every=1, name='val_iou')
+
+    history = model.fit(
+        X_tr, Y_tr,
+        validation_data=(X_va, Y_va),
+        epochs=TOTAL_EPOCHS,           # or whatever you're running
+        batch_size=4,
+        callbacks=[lr_cb, val_iou_cb]  # include your other callbacks here
+    )
 
     # evaluate IoU on validation
     preds = model.predict(X_va)
@@ -166,4 +265,11 @@ if __name__ == "__main__":
         plt.title(f"IoU: {iou_xywh(pred,gt):.3f}")
         plt.axis('off')
         plt.show()
+
+plt.figure()
+plt.plot(history.history['loss'], label='loss')
+plt.plot(history.history['val_loss'], label='val_loss')
+plt.plot(history.history['val_iou'], label='val_iou')
+plt.xlabel('epoch'); plt.legend(); plt.title('Loss & IoU'); plt.show()
+
 
