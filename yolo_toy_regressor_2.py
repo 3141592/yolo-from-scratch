@@ -8,6 +8,7 @@ import tensorflow as tf
 from tensorflow.keras import layers, models
 from skimage.measure import label, regionprops
 import matplotlib.pyplot as plt
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
 
 # Quiet loggin
 import os
@@ -121,44 +122,80 @@ def make_model(input_shape=(448,448,3)):
     # Input Layer
     inp = layers.Input(shape=input_shape)
     # Layer 1
-    x = layers.Conv2D(192,7, strides=(2,2),activation='relu',padding='same')(inp)
+    x = layers.Conv2D(192,7, strides=(2,2),padding='same')(inp)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
     x = layers.MaxPool2D(pool_size=(2, 2), strides=2)(x)
     # Layer 2
-    x = layers.Conv2D(256,3,activation='relu',padding='same')(x)
+    x = layers.Conv2D(256,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
     x = layers.MaxPool2D(pool_size=(2, 2), strides=2)(x)
     # Layer 3
-    x = layers.Conv2D(128,1,activation='relu',padding='same')(x)
-    x = layers.Conv2D(256,3,activation='relu',padding='same')(x)
-    x = layers.Conv2D(256,1,activation='relu',padding='same')(x)
-    x = layers.Conv2D(512,3,activation='relu',padding='same')(x)
+    x = layers.Conv2D(128,1,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(256,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(256,1,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(512,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
     x = layers.MaxPool2D(pool_size=(2, 2), strides=2)(x)
     # Layer 4
-    x = layers.Conv2D(256,1,activation='relu',padding='same')(x)
-    x = layers.Conv2D(512,3,activation='relu',padding='same')(x)
-    x = layers.Conv2D(256,1,activation='relu',padding='same')(x)
-    x = layers.Conv2D(512,3,activation='relu',padding='same')(x)
-    x = layers.Conv2D(256,1,activation='relu',padding='same')(x)
-    x = layers.Conv2D(512,3,activation='relu',padding='same')(x)
-    x = layers.Conv2D(256,1,activation='relu',padding='same')(x)
-    x = layers.Conv2D(512,3,activation='relu',padding='same')(x)
+    x = layers.Conv2D(256,1,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(512,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(256,1,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(512,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(256,1,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(512,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(256,1,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(512,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
 
-    x = layers.Conv2D(512,1,activation='relu',padding='same')(x)
-    x = layers.Conv2D(1024,3,activation='relu',padding='same')(x)
+    x = layers.Conv2D(512,1,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(1024,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
     x = layers.MaxPool2D(pool_size=(2, 2), strides=2)(x)
 
     # Layer 5
-    x = layers.Conv2D(512,1,activation='relu',padding='same')(x)
-    x = layers.Conv2D(1024,3,activation='relu',padding='same')(x)
-    x = layers.Conv2D(512,1,activation='relu',padding='same')(x)
-    x = layers.Conv2D(1024,3,activation='relu',padding='same')(x)
+    x = layers.Conv2D(512,1,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(1024,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(512,1,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(1024,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
 
-    x = layers.Conv2D(1024,3,activation='relu',padding='same')(x)
-    x = layers.Conv2D(1024,3,strides=(2, 2),activation='relu',padding='same')(x)
+    x = layers.Conv2D(1024,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(1024,3,strides=(2, 2),padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
 
     # Layer 6
-    x = layers.GlobalAveragePooling2D()(x)
-    x = layers.Dense(128, activation='relu')(x)
-    out = layers.Dense(4, activation='sigmoid', dtype='float32')(x)
+    x = layers.Conv2D(1024,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+    x = layers.Conv2D(1024,3,padding='same')(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+
+
+    # Layer 7
+    #x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Flatten()(x)
+    x = layers.Dense(4096)(x)
+    x = layers.LeakyReLU(negative_slope=0.1)(x)
+
+    # Layer 8 (DropOut)
+    x = layers.Dropout(0.5)(x)
+
+    # Layer 9
+    out = layers.Dense(4, activation=None, dtype='float32')(x)
     return models.Model(inp, out)
 
 # --- train & eval (example) ---
@@ -194,7 +231,7 @@ if __name__ == "__main__":
         optimizer = tf.keras.optimizers.SGD(learning_rate=1e-3, momentum=0.9)
 
     # YOLOv1-style LR schedule (warmup -> 1e-2 -> 1e-3 -> 1e-4), totalling ~135 epochs.
-    TOTAL_EPOCHS = 10
+    TOTAL_EPOCHS = 30
     WARMUP_EPOCHS = 3  # small warmup from 1e-3 up to 1e-2
 
     def yolo_v1_lr_schedule(epoch):
@@ -209,7 +246,7 @@ if __name__ == "__main__":
             return 1e-4
 
     class ValIoUCallback(tf.keras.callbacks.Callback):
-        def __init__(self, X_val, Y_val, every=1, name='val_iou'):
+        def __init__(self, X_val, Y_val, every=5, name='val_iou'):
             super().__init__()
             self.X_val = X_val
             self.Y_val = Y_val
@@ -229,18 +266,27 @@ if __name__ == "__main__":
 
     lr_cb = tf.keras.callbacks.LearningRateScheduler(yolo_v1_lr_schedule, verbose=1)
 
-    model.compile(optimizer=optimizer, loss='mse', metrics=[iou_metric])
+    model.compile(optimizer=optimizer, loss=tf.keras.losses.Huber(), metrics=[iou_metric])
     model.summary()
     #sys.exit()
 
     val_iou_cb = ValIoUCallback(X_va, Y_va, every=1, name='val_iou')
+    cbs = [
+      val_iou_cb,
+      ModelCheckpoint("best_val_iou.weights.h5", monitor="val_iou", mode="max",
+                      save_best_only=True, save_weights_only=True, verbose=1),
+      ReduceLROnPlateau(monitor="val_loss", factor=0.5, patience=4,
+                        min_lr=1e-6, verbose=1),
+      EarlyStopping(monitor="val_iou", mode="max", patience=12,
+                    restore_best_weights=True, verbose=1),
+    ]  
 
     history = model.fit(
         X_tr, Y_tr,
         validation_data=(X_va, Y_va),
         epochs=TOTAL_EPOCHS,           # or whatever you're running
-        batch_size=4,
-        callbacks=[lr_cb, val_iou_cb]  # include your other callbacks here
+        batch_size=8,
+        callbacks=cbs
     )
 
     # evaluate IoU on validation
