@@ -1,4 +1,4 @@
-# keras-yolo-from-scratch
+# yolo-from-scratch
 
 An educational implementation of the YOLO (You Only Look Once) object detection algorithm using **TensorFlow + Keras**.  
 The goal is to understand *how YOLO works under the hood* by building each component step-by-step, starting with YOLOv1 and extending to YOLOv2.
