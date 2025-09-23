@@ -205,8 +205,8 @@ if __name__ == "__main__":
     train = ds["train"]; val = ds["val"]
 
     # Prepare data
-    sample_list = [train[i] for i in range(200)]
-    X, Y = get_samples_from_dataset(sample_list, max_samples=200)
+    sample_list = [train[i] for i in range(500)]
+    X, Y = get_samples_from_dataset(sample_list, max_samples=500)
     # split
     idx = int(0.8*len(X))
     X_tr, Y_tr = X[:idx], Y[:idx]
