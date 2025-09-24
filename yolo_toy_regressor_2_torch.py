@@ -5,7 +5,7 @@
 # - Records per-epoch: lr, train_loss, val_loss, val_iou and plots them.
 #
 # Note: PyTorch expects NCHW; images are converted from NHWC.
-
+import sys
 import os
 import numpy as np
 from io import BytesIO
@@ -19,6 +19,7 @@ from torch.utils.data import TensorDataset, DataLoader
 
 from datasets import load_dataset
 from skimage.measure import label, regionprops
+from torchsummary import summary
 
 # ---------- Helpers (ported 1:1) ----------
 def mask_bytes_to_boxes(mask_bytes):
@@ -87,6 +88,73 @@ def iou_xywh_torch(pred, gt):
     union  = area_p + area_g - inter_area
     iou    = torch.where(union > 0, inter_area / union, torch.zeros_like(union))
     return iou.mean().item()
+
+import torch, torch.nn as nn
+
+def xywh_to_xyxy(b):
+    x,y,w,h = b.unbind(-1)
+    x1 = x - w/2; y1 = y - h/2
+    x2 = x + w/2; y2 = y + h/2
+    return torch.stack([x1,y1,x2,y2], dim=-1)
+
+def box_iou_xyxy(a, b):
+    tl = torch.maximum(a[..., :2], b[..., :2])
+    br = torch.minimum(a[..., 2:], b[..., 2:])
+    inter = (br - tl).clamp(min=0).prod(-1)
+    area_a = (a[..., 2]-a[..., 0]).clamp(min=0) * (a[..., 3]-a[..., 1]).clamp(min=0)
+    area_b = (b[..., 2]-b[..., 0]).clamp(min=0) * (b[..., 3]-b[..., 1]).clamp(min=0)
+    union = area_a + area_b - inter + 1e-9
+    return inter / union
+
+def ciou_loss(pred_xywh, gt_xywh):
+    """
+    pred_xywh, gt_xywh: (..., 4) with xy in [0,1], w,h > 0 (normalized).
+    Returns:
+      loss: 1 - CIoU
+      iou: IoU
+      ciou: CIoU
+    """
+    p = xywh_to_xyxy(pred_xywh); g = xywh_to_xyxy(gt_xywh)
+    iou = box_iou_xyxy(p, g)
+
+    # center distance
+    pc = (p[..., :2] + p[..., 2:]) / 2
+    gc = (g[..., :2] + g[..., 2:]) / 2
+    center_dist = ((pc - gc) ** 2).sum(-1)
+
+    # enclosing diagonal
+    enc_tl = torch.minimum(p[..., :2], g[..., :2])
+    enc_br = torch.maximum(p[..., 2:], g[..., 2:])
+    c2 = ((enc_br - enc_tl) ** 2).sum(-1) + 1e-9
+
+    # aspect term
+    pw = (p[..., 2]-p[..., 0]).clamp(min=1e-9)
+    ph = (p[..., 3]-p[..., 1]).clamp(min=1e-9)
+    gw = (g[..., 2]-g[..., 0]).clamp(min=1e-9)
+    gh = (g[..., 3]-g[..., 1]).clamp(min=1e-9)
+    v = (4/torch.pi**2) * (torch.atan(gw/gh) - torch.atan(pw/ph))**2
+    with torch.no_grad():
+        alpha = v / (1 - iou + v + 1e-9)
+
+    ciou = iou - (center_dist / c2) - alpha * v
+    return (1 - ciou).clamp(min=0), iou, ciou
+
+def decode_head(t):
+    # t: (..., 4) unconstrained
+    tx, ty, tw, th = t.unbind(-1)
+    xy = torch.sigmoid(torch.stack([tx, ty], dim=-1))         # → [0,1]
+    wh = torch.exp(torch.stack([tw, th], dim=-1))             # > 0
+    # Optional: scale to a max fraction of the image to avoid gigantic boxes early on
+    wh = wh.clamp(max=1.0)
+    xywh = torch.cat([xy, wh], dim=-1)
+    # Final clamp to image-normalized bounds:
+    xywh = torch.stack([
+        xywh[...,0].clamp(0,1),
+        xywh[...,1].clamp(0,1),
+        xywh[...,2].clamp(1e-6,1.0),
+        xywh[...,3].clamp(1e-6,1.0),
+    ], dim=-1)
+    return xywh
 
 def get_samples_from_dataset(dataset, max_samples=500):
     X = []
@@ -164,6 +232,8 @@ class YOLOToyRegressor(nn.Module):
             nn.Flatten(),
             nn.Linear(flat, 4096),
             nn.LeakyReLU(0.1, inplace=True),
+            #nn.Linear(flat, 4096),
+            #nn.LeakyReLU(0.1, inplace=True),
             nn.Dropout(0.5),
             nn.Linear(4096, 4)  # [xc,yc,w,h]
         )
@@ -206,14 +276,18 @@ def evaluate(model, loader, device, loss_fn):
     total_loss = 0.0
     total_iou = 0.0
     n = 0
-    for xb, yb in loader:
-        xb = xb.to(device, non_blocking=True)
-        yb = yb.to(device, non_blocking=True)
-        preds = model(xb)
-        loss = loss_fn(preds, yb)
-        total_loss += loss.item() * xb.size(0)
-        total_iou  += iou_xywh_torch(preds, yb) * xb.size(0)
-        n += xb.size(0)
+    with torch.no_grad():
+        for xb, yb in loader:
+            xb = xb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)
+
+            preds = model(xb)
+            loss, iou_mean = loss_fn(preds, yb)   # unpack tuple
+
+            total_loss += loss.item() * xb.size(0)
+            total_iou  += iou_mean.item() * xb.size(0)
+            n += xb.size(0)
+
     return total_loss / n, total_iou / n
 
 def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0):
@@ -227,7 +301,8 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0):
         opt.zero_grad(set_to_none=True)
         with torch.amp.autocast(enabled=torch.cuda.is_available(), device_type="cuda"):
             preds = model(xb)
-            loss = loss_fn(preds, yb)
+            #loss = loss_fn(preds, yb)
+            loss, iou_mean = loss_fn(preds, yb)   # ⟵ unpack the tuple
         scaler.scale(loss).backward()
         if max_norm is not None:
             scaler.unscale_(opt)
@@ -267,7 +342,17 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = YOLOToyRegressor().to(device)
-    loss_fn = nn.SmoothL1Loss(reduction="mean")
+    summary(model, input_size=(3, 448, 448), device=str(device))
+
+    #loss_fn = nn.SmoothL1Loss(reduction="mean")
+    # New: use CIoU as the primary loss
+    def loss_fn(pred_t, gt_xywh):
+        pred_xywh = decode_head(pred_t)
+        loss_ciou, iou, _ = ciou_loss(pred_xywh, gt_xywh)
+        loss = loss_ciou.mean()
+        iou_mean = iou.mean()
+        return loss, iou_mean
+
     opt = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=5e-4)
     plateau = optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4, min_lr=1e-6)
     scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
@@ -324,6 +409,7 @@ def main():
     preds = np.concatenate(preds, axis=0)
     ious = [iou_xywh_np(p, g) for p, g in zip(preds, Y_va)]
     print("val IoU mean:", float(np.mean(ious)))
+    print("val IoU median:", float(np.median(ious)))
 
     # ---- Plot history (loss & IoU) ----
     plt.figure()
