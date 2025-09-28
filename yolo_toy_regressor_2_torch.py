@@ -16,10 +16,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
+from torch.cuda.amp import autocast, GradScaler
+import math
 
 from datasets import load_dataset
 from skimage.measure import label, regionprops
 from torchsummary import summary
+
+DEBUG = True
 
 # ---------- Helpers (ported 1:1) ----------
 def mask_bytes_to_boxes(mask_bytes):
@@ -139,22 +143,7 @@ def ciou_loss(pred_xywh, gt_xywh):
     ciou = iou - (center_dist / c2) - alpha * v
     return (1 - ciou).clamp(min=0), iou, ciou
 
-def decode_head(t):
-    # t: (..., 4) unconstrained
-    tx, ty, tw, th = t.unbind(-1)
-    xy = torch.sigmoid(torch.stack([tx, ty], dim=-1))         # → [0,1]
-    wh = torch.exp(torch.stack([tw, th], dim=-1))             # > 0
-    # Optional: scale to a max fraction of the image to avoid gigantic boxes early on
-    wh = wh.clamp(max=1.0)
-    xywh = torch.cat([xy, wh], dim=-1)
-    # Final clamp to image-normalized bounds:
-    xywh = torch.stack([
-        xywh[...,0].clamp(0,1),
-        xywh[...,1].clamp(0,1),
-        xywh[...,2].clamp(1e-6,1.0),
-        xywh[...,3].clamp(1e-6,1.0),
-    ], dim=-1)
-    return xywh
+def logit(p): return math.log(p/(1-p))
 
 def get_samples_from_dataset(dataset, max_samples=500):
     X = []
@@ -290,29 +279,87 @@ def evaluate(model, loader, device, loss_fn):
 
     return total_loss / n, total_iou / n
 
-def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0):
+def global_grad_norm(model):
+    g2 = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            g2 += p.grad.detach().pow(2).sum().item()
+    return (g2 ** 0.5)
+
+def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0, head_attr="fc"):
     model.train()
-    running = 0.0
-    n = 0
-    for xb, yb in loader:
+
+    # --- check optimizer coverage ---
+    if DEBUG:
+        opt_ids = {id(p) for g in opt.param_groups for p in g["params"]}
+        miss = [n for n,p in model.named_parameters()
+                if p.requires_grad and id(p) not in opt_ids]
+        assert not miss, f"Params missing from optimizer: {miss[:5]}"
+
+        # check BN train mode
+        for m in model.modules():
+            if isinstance(m, torch.nn.BatchNorm2d):
+                assert m.training, "BatchNorm stuck in eval() during training"
+
+    running_loss = 0.0
+    running_iou  = 0.0
+    n_seen = 0
+
+    # locate last Linear for debug grad stats
+    import torch.nn as nn
+    last_linear = None
+    if DEBUG:
+        head = getattr(model, head_attr, model)
+        for m in reversed(list(head.modules())):
+            if isinstance(m, nn.Linear):
+                last_linear = m; break
+
+    for step, (xb, yb) in enumerate(loader):
         xb = xb.to(device, non_blocking=True)
         yb = yb.to(device, non_blocking=True)
+        bs = xb.size(0)
 
         opt.zero_grad(set_to_none=True)
-        with torch.amp.autocast(enabled=torch.cuda.is_available(), device_type="cuda"):
-            preds = model(xb)
-            #loss = loss_fn(preds, yb)
-            loss, iou_mean = loss_fn(preds, yb)   # ⟵ unpack the tuple
+
+        if DEBUG and step < 2:
+            print(f"[dbg] xb mean/std: {xb.mean().item():.4f}/{xb.std().item():.4f} "
+                  f"min/max: {xb.min().item():.3f}/{xb.max().item():.3f}")
+            with torch.no_grad():
+                t_probe = model(xb)
+                print("[dbg] pre-train logits std:", [float(s) for s in t_probe.std(dim=0)])
+
+        with torch.amp.autocast("cuda"):
+            pred_t = model(xb)
+            loss, iou_mean = loss_fn(pred_t, yb)
+
+        assert loss.requires_grad, "Loss is detached; check loss_fn."
+
         scaler.scale(loss).backward()
-        if max_norm is not None:
-            scaler.unscale_(opt)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+
+        if DEBUG and step < 2:
+            gnorm = global_grad_norm(model)
+            print(f"[dbg] global grad norm: {gnorm:.4f}")
+            if last_linear is not None and last_linear.weight.grad is not None:
+                print(f"[dbg] last-linear grad mean/std: "
+                      f"{last_linear.weight.grad.mean().item():.4e}/"
+                      f"{last_linear.weight.grad.std().item():.4e}")
+            else:
+                print("[dbg] last-linear grad missing (None)")
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         scaler.step(opt)
         scaler.update()
 
-        running += loss.item() * xb.size(0)
-        n += xb.size(0)
-    return running / n
+        if DEBUG and step < 2:
+            with torch.no_grad():
+                t_after = model(xb)
+                print("[dbg] post-step logits std:", [float(s) for s in t_after.std(dim=0)])
+
+        running_loss += loss.detach().item() * bs
+        running_iou  += iou_mean.detach().item() * bs
+        n_seen += bs
+
+    return running_loss / max(n_seen, 1), running_iou / max(n_seen, 1)
 
 def main():
     # --- Load data (same parquet paths you used) ---
@@ -353,11 +400,55 @@ def main():
         iou_mean = iou.mean()
         return loss, iou_mean
 
-    opt = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=5e-4)
-    plateau = optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4, min_lr=1e-6)
+    def logit(p): return math.log(p/(1-p))
+
+    def init_head_biases(model, head_attr="fc", prior_xy=(0.5,0.5), prior_wh=(0.25,0.35)):
+        head = getattr(model, head_attr)
+        last = None
+        for m in reversed(list(head.modules())):
+            if isinstance(m, nn.Linear):
+                last = m; break
+        assert last is not None, "Couldn't find final Linear layer in head"
+        nn.init.xavier_uniform_(last.weight)
+        with torch.no_grad():
+            last.bias.zero_()
+            last.bias[0] = logit(prior_xy[0])  # tx
+            last.bias[1] = logit(prior_xy[1])  # ty
+            last.bias[2] = logit(prior_wh[0])  # tw
+            last.bias[3] = logit(prior_wh[1])  # th
+
+    # 3. Set realistic size priors in the head (critical)
+    # compute dataset medians once (normalized [0,1])
+    def estimate_size_priors(loader):
+        ws, hs = [], []
+        for _, y in loader:
+            ws.append(y[...,2].reshape(-1))
+            hs.append(y[...,3].reshape(-1))
+        import torch
+        w = torch.cat(ws).median().item()
+        h = torch.cat(hs).median().item()
+        eps = 1e-3
+        return (min(max(w,eps),1-eps), min(max(h,eps),1-eps))
+
+    # call:
+    w_med,h_med = estimate_size_priors(train_loader)
+    init_head_biases(model, head_attr="fc", prior_xy=(0.5,0.5), prior_wh=(w_med,h_med))
+    PRIOR_W, PRIOR_H = w_med, h_med  # from estimate_size_priors()
+
+    def decode_head(t):
+        tx, ty, tw, th = t.unbind(-1)
+        xy = torch.sigmoid(torch.stack([tx,ty], dim=-1))             # [0,1]
+        wh = torch.exp(torch.stack([tw,th], dim=-1)) * torch.tensor([PRIOR_W, PRIOR_H], device=t.device)
+        wh = wh.clamp(min=1e-4, max=1.0)                             # keep in bounds
+        return torch.cat([xy, wh], dim=-1)
+
+    opt = optim.SGD(model.parameters(), lr=2e-2, momentum=0.9, weight_decay=5e-4)
+    #plateau = optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4, min_lr=1e-6)
+    TOTAL_EPOCHS = 30
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=TOTAL_EPOCHS, eta_min=1e-4)
+
     scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
 
-    TOTAL_EPOCHS = 30
     early = EarlyStoppingMax(patience=12, min_delta=0.0)
     best_val_iou = -1.0
     best_path = "best_val_iou.pt"
@@ -371,9 +462,10 @@ def main():
         for pg in opt.param_groups:
             pg["lr"] = lr
 
-        train_loss = train_one_epoch(model, train_loader, device, opt, scaler, loss_fn)
+        train_loss, train_iou = train_one_epoch(model, train_loader, device, opt, scaler, loss_fn, max_norm=10)
         val_loss, val_iou = evaluate(model, val_loader, device, loss_fn)
-        plateau.step(val_loss)
+        #plateau.step(val_loss)
+        scheduler.step()   # step after each epoch
 
         print(f"Epoch {epoch+1:03d} | lr {lr:.6f} | train {train_loss:.4f} | val {val_loss:.4f} | val_iou {val_iou:.4f}")
 
