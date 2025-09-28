@@ -21,6 +21,8 @@ from torch.utils.data import TensorDataset, DataLoader
 from datasets import load_dataset
 from skimage.measure import label, regionprops
 
+DEBUG = False
+
 # ---------- Helpers (ported 1:1) ----------
 def mask_bytes_to_boxes(mask_bytes):
     im = Image.open(BytesIO(mask_bytes))
@@ -228,8 +230,9 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0):
         opt.zero_grad(set_to_none=True)
         with torch.amp.autocast(enabled=torch.cuda.is_available(), device_type="cuda"):
             preds = model(xb)
-            # [xc,yc,w,h]
-            print(f"[xc,yc,w,h]: {preds}>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+            if DEBUG:
+                # [xc,yc,w,h]
+                print(f"[xc,yc,w,h]: {preds}>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 
             loss = loss_fn(preds, yb)
         scaler.scale(loss).backward()
@@ -254,8 +257,8 @@ def main():
     )
     train = ds["train"]; val = ds["val"]
 
-    sample_list = [train[i] for i in range(4)]
-    X, Y = get_samples_from_dataset(sample_list, max_samples=4)
+    sample_list = [train[i] for i in range(16)]
+    X, Y = get_samples_from_dataset(sample_list, max_samples=16)
     idx = int(0.8*len(X))
     X_tr, Y_tr = X[:idx], Y[:idx]
     X_va, Y_va = X[idx:], Y[idx:]
@@ -272,11 +275,11 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = YOLOToyRegressor().to(device)
     loss_fn = nn.SmoothL1Loss(reduction="mean")
-    opt = optim.SGD(model.parameters(), lr=1e-3, momentum=0.9, weight_decay=5e-4)
+    opt = optim.SGD(model.parameters(), lr=3e-3, momentum=0.9, weight_decay=5e-4)
     plateau = optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4, min_lr=1e-6)
     scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
 
-    TOTAL_EPOCHS = 30
+    TOTAL_EPOCHS = 5
     early = EarlyStoppingMax(patience=12, min_delta=0.0)
     best_val_iou = -1.0
     best_path = "best_val_iou.pt"
@@ -319,40 +322,55 @@ def main():
 
     # Evaluate IoU on validation (numpy version for parity with your printout)
     model.eval()
+
+    P, T = [], []
     with torch.no_grad():
-        preds = []
-        for xb, _ in val_loader:
-            xb = xb.to(device)
-            p = model(xb).cpu().numpy()
-            preds.append(p)
-    preds = np.concatenate(preds, axis=0)
-    ious = [iou_xywh_np(p, g) for p, g in zip(preds, Y_va)]
-    print("val IoU mean:", float(np.mean(ious)))
+        for i in range(len(X_va)):
+            x = torch.from_numpy(X_va[i]).permute(2,0,1).unsqueeze(0).to(device)
+            p = model(x)[0].detach().cpu().float().numpy()
+            P.append(p); T.append(Y_va[i])
+    P, T = np.stack(P), np.stack(T)   # (N,4)
 
-    # ---- Plot history (loss & IoU) ----
-    plt.figure()
-    plt.plot(history["epoch"], history["train_loss"], label="loss")
-    plt.plot(history["epoch"], history["val_loss"], label="val_loss")
-    plt.plot(history["epoch"], history["val_iou"], label="val_iou")
-    plt.xlabel("epoch"); plt.legend(); plt.title("Loss & IoU (PyTorch)"); plt.show()
+    print("pred mean:", P.mean(0), "pred std:", P.std(0))
+    print("tgt  mean:", T.mean(0), "tgt  std:", T.std(0))
 
-    # visualize a few predictions
-    for i in range(min(5, len(X_va))):
-        img = (X_va[i]*255).astype(np.uint8)
-        pred = preds[i]; gt = Y_va[i]
-        plt.figure()
-        plt.imshow(img)
-        H, W, _ = img.shape
-        def draw_box(xywh, color):
-            xc,yc,w,h = xywh
-            x_min = int((xc - 0.5*w)*W); x_max = int((xc+0.5*w)*W)
-            y_min = int((yc - 0.5*h)*H); y_max = int((yc+0.5*h)*H)
-            plt.gca().add_patch(plt.Rectangle((x_min,y_min), x_max-x_min, y_max-y_min,
-                                              fill=False, edgecolor=color, linewidth=2))
-        draw_box(gt,  'g')
-        draw_box(pred,'r')
-        plt.title(f"IoU: {iou_xywh_np(pred,gt):.3f}")
-        plt.axis('off'); plt.show()
+    if DEBUG:
+        sys.exit()
+
+    with torch.no_grad():
+        for i in range(min(5, len(X_va))):
+            # 1) Get the exact tensor you would feed the model
+            # If your model expects CHW float in [0,1] and normalized, do that here.
+            img_np = X_va[i]                      # (H,W,3) in [0,1]?
+            H, W, _ = img_np.shape
+
+            # build model input exactly like your val pipeline
+            x_t = torch.from_numpy(img_np).permute(2,0,1).unsqueeze(0).to(device)  # (1,3,H,W)
+            # apply same normalization as training/val transforms if used
+
+            # 2) Predict
+            pred = model(x_t)[0].detach().cpu().float().numpy()  # [xc,yc,w,h] in [0,1]
+            # [xc,yc,w,h]
+            print(f"[xc,yc,w,h]: {i} {pred}")
+
+            # 3) Draw
+            def draw_box_xywh(ax, xywh, color):
+                xc, yc, w, h = xywh
+                x1 = int((xc - 0.5*w) * W); x2 = int((xc + 0.5*w) * W)
+                y1 = int((yc - 0.5*h) * H); y2 = int((yc + 0.5*h) * H)
+                ax.add_patch(plt.Rectangle((x1,y1), x2-x1, y2-y1,
+                                           fill=False, edgecolor=color, linewidth=2))
+                ax.scatter([xc*W], [yc*H], s=24)  # draw center for sanity
+
+            gt = Y_va[i]  # must be normalized [xc,yc,w,h] for the same image
+
+            plt.figure()
+            plt.imshow((img_np*255).astype(np.uint8))  # if already in [0,1]
+            draw_box_xywh(plt.gca(), gt,   'g')
+            draw_box_xywh(plt.gca(), pred, 'r')
+            plt.title(f"IoU: {iou_xywh_np(pred, gt):.3f}")
+            plt.axis('off'); plt.show()
+
 
 if __name__ == "__main__":
     main()
