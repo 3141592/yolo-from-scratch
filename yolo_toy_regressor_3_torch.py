@@ -1,10 +1,12 @@
-# yolo_toy_regressor_2_torch.py (REORGANIZED ONLY)
-# NOTE: This is a structural reorganization for clarity. No functional changes were made.
-# - Same defaults, schedules, loss wiring, priors, and evaluation/visualization logic.
-# - Keeps both CosineAnnealingLR and the manual YOLO schedule (as in the original).
+# yolo_toy_regressor_2_torch_fixed.py
+# Changes from reorganized version:
+# 1) Decode predictions before NumPy IoU summary and visualization (aligns boxes).
+# 2) Remove CosineAnnealingLR; keep manual YOLO-style LR schedule only (no scheduler.step()).
+# 3) Guard autocast for CPU safety (enabled only if CUDA is available).
+# 4) Ensure PRIOR_W/PRIOR_H are set after estimating priors from train_loader.
+# Everything else kept as-is.
 
 import os
-import sys
 import math
 from io import BytesIO
 
@@ -76,7 +78,6 @@ def iou_xywh_np(pred, gt):
 
 @torch.no_grad()
 def iou_xywh_torch(pred, gt):
-    # pred, gt: [B,4] in [xc,yc,w,h] normalized
     p = torch.stack([
         pred[:,0] - 0.5*pred[:,2],
         pred[:,1] - 0.5*pred[:,3],
@@ -118,24 +119,14 @@ def box_iou_xyxy(a, b):
     return inter / union
 
 def ciou_loss(pred_xywh, gt_xywh):
-    """
-    pred_xywh, gt_xywh: (..., 4) with xy in [0,1], w,h > 0 (normalized).
-    Returns: loss (1 - CIoU), iou, ciou
-    """
     p = xywh_to_xyxy(pred_xywh); g = xywh_to_xyxy(gt_xywh)
     iou = box_iou_xyxy(p, g)
-
-    # center distance
     pc = (p[..., :2] + p[..., 2:]) / 2
     gc = (g[..., :2] + g[..., 2:]) / 2
     center_dist = ((pc - gc) ** 2).sum(-1)
-
-    # enclosing diagonal
     enc_tl = torch.minimum(p[..., :2], g[..., :2])
     enc_br = torch.maximum(p[..., 2:], g[..., 2:])
     c2 = ((enc_br - enc_tl) ** 2).sum(-1) + 1e-9
-
-    # aspect term
     pw = (p[..., 2]-p[..., 0]).clamp(min=1e-9)
     ph = (p[..., 3]-p[..., 1]).clamp(min=1e-9)
     gw = (g[..., 2]-g[..., 0]).clamp(min=1e-9)
@@ -143,7 +134,6 @@ def ciou_loss(pred_xywh, gt_xywh):
     v = (4/torch.pi**2) * (torch.atan(gw/gh) - torch.atan(pw/ph))**2
     with torch.no_grad():
         alpha = v / (1 - iou + v + 1e-9)
-
     ciou = iou - (center_dist / c2) - alpha * v
     return (1 - ciou).clamp(min=0), iou, ciou
 
@@ -166,8 +156,8 @@ def get_samples_from_dataset(dataset, max_samples=500):
         W, H = orig.size
         Y.append(box_to_xywh_norm(best, H, W))
         X.append(np.array(img).astype(np.float32)/255.0)
-    X = np.stack(X)  # (N, 448, 448, 3)
-    Y = np.stack(Y)  # (N, 4)
+    X = np.stack(X)
+    Y = np.stack(Y)
     return X, Y
 
 # ------------------------------
@@ -204,7 +194,7 @@ class YOLOToyRegressor(nn.Module):
             Conv2D(256, 512, 3),
             Conv2D(512, 512, 1),
             Conv2D(512, 1024, 3),
-            pool(),
+            nn.MaxPool2d(2,2),
             Conv2D(1024, 512, 1),
             Conv2D(512, 1024, 3),
             Conv2D(1024, 512, 1),
@@ -222,9 +212,8 @@ class YOLOToyRegressor(nn.Module):
             nn.Linear(flat, 4096),
             nn.LeakyReLU(0.1, inplace=True),
             nn.Dropout(0.5),
-            nn.Linear(4096, 4)  # [xc,yc,w,h]
+            nn.Linear(4096, 4)
         )
-
     def forward(self, x):
         x = self.feat(x)
         x = self.fc(x)
@@ -281,10 +270,10 @@ def init_head_biases(model, head_attr="fc", prior_xy=(0.5,0.5), prior_wh=(0.25,0
     nn.init.xavier_uniform_(last.weight)
     with torch.no_grad():
         last.bias.zero_()
-        last.bias[0] = logit(prior_xy[0])  # tx
-        last.bias[1] = logit(prior_xy[1])  # ty
-        last.bias[2] = logit(prior_wh[0])  # tw
-        last.bias[3] = logit(prior_wh[1])  # th
+        last.bias[0] = logit(prior_xy[0])
+        last.bias[1] = logit(prior_xy[1])
+        last.bias[2] = logit(prior_wh[0])
+        last.bias[3] = logit(prior_wh[1])
 
 def estimate_size_priors(loader):
     ws, hs = [], []
@@ -296,14 +285,13 @@ def estimate_size_priors(loader):
     eps = 1e-3
     return (min(max(w,eps),1-eps), min(max(h,eps),1-eps))
 
-# Globals used by decode_head (kept as in original)
 PRIOR_W, PRIOR_H = 0.25, 0.35
 
 def decode_head(t):
     tx, ty, tw, th = t.unbind(-1)
-    xy = torch.sigmoid(torch.stack([tx,ty], dim=-1))             # [0,1]
+    xy = torch.sigmoid(torch.stack([tx,ty], dim=-1))
     wh = torch.exp(torch.stack([tw,th], dim=-1)) * torch.tensor([PRIOR_W, PRIOR_H], device=t.device)
-    wh = wh.clamp(min=1e-4, max=1.0)                             # keep in bounds
+    wh = wh.clamp(min=1e-4, max=1.0)
     return torch.cat([xy, wh], dim=-1)
 
 # ------------------------------
@@ -320,7 +308,7 @@ def evaluate(model, loader, device, loss_fn):
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
             preds = model(xb)
-            loss, iou_mean = loss_fn(preds, yb)   # unpack tuple
+            loss, iou_mean = loss_fn(preds, yb)
             total_loss += loss.item() * xb.size(0)
             total_iou  += iou_mean.item() * xb.size(0)
             n += xb.size(0)
@@ -344,18 +332,18 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0, h
         for m in reversed(list(head.modules())):
             if isinstance(m, nn.Linear):
                 last_linear = m; break
+    use_cuda = torch.cuda.is_available()
     for step, (xb, yb) in enumerate(loader):
         xb = xb.to(device, non_blocking=True)
         yb = yb.to(device, non_blocking=True)
         bs = xb.size(0)
         opt.zero_grad(set_to_none=True)
         if DEBUG and step < 2:
-            print(f"[dbg] xb mean/std: {xb.mean().item():.4f}/{xb.std().item():.4f} "
-                  f"min/max: {xb.min().item():.3f}/{xb.max().item():.3f}")
+            print(f"[dbg] xb mean/std: {xb.mean().item():.4f}/{xb.std().item():.4f} min/max: {xb.min().item():.3f}/{xb.max().item():.3f}")
             with torch.no_grad():
                 t_probe = model(xb)
                 print("[dbg] pre-train logits std:", [float(s) for s in t_probe.std(dim=0)])
-        with torch.amp.autocast("cuda"):
+        with torch.amp.autocast(device_type="cuda", enabled=use_cuda):
             pred_t = model(xb)
             loss, iou_mean = loss_fn(pred_t, yb)
         assert loss.requires_grad, "Loss is detached; check loss_fn."
@@ -364,9 +352,7 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0, h
             gnorm = global_grad_norm(model)
             print(f"[dbg] global grad norm: {gnorm:.4f}")
             if last_linear is not None and last_linear.weight.grad is not None:
-                print(f"[dbg] last-linear grad mean/std: "
-                      f"{last_linear.weight.grad.mean().item():.4e}/"
-                      f"{last_linear.weight.grad.std().item():.4e}")
+                print(f"[dbg] last-linear grad mean/std: {last_linear.weight.grad.mean().item():.4e}/{last_linear.weight.grad.std().item():.4e}")
             else:
                 print("[dbg] last-linear grad missing (None)")
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
@@ -385,7 +371,6 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0, h
 # Main
 # ------------------------------
 def main():
-    # Load parquet datasets
     ds = load_dataset(
         "parquet",
         data_files={
@@ -401,7 +386,6 @@ def main():
     X_tr, Y_tr = X[:idx], Y[:idx]
     X_va, Y_va = X[idx:], Y[idx:]
 
-    # Torch tensors (NCHW)
     X_tr_t = torch.from_numpy(np.transpose(X_tr, (0,3,1,2))).contiguous()
     Y_tr_t = torch.from_numpy(Y_tr).contiguous()
     X_va_t = torch.from_numpy(np.transpose(X_va, (0,3,1,2))).contiguous()
@@ -414,32 +398,24 @@ def main():
     model = YOLOToyRegressor().to(device)
     summary(model, input_size=(3, 448, 448), device=str(device))
 
-    # Loss wrapper (CIoU-based) — unchanged
     def loss_fn(pred_t, gt_xywh):
         pred_xywh = decode_head(pred_t)
         loss_ciou, iou, _ = ciou_loss(pred_xywh, gt_xywh)
-        loss = loss_ciou.mean()
-        iou_mean = iou.mean()
-        return loss, iou_mean
+        return loss_ciou.mean(), iou.mean()
 
-    # Compute dataset priors & init head biases (order preserved)
+    # ---- Estimate priors and initialize head biases ----
     w_med, h_med = estimate_size_priors(train_loader)
     init_head_biases(model, head_attr="fc", prior_xy=(0.5,0.5), prior_wh=(w_med, h_med))
-
-    # set globals for decode_head
     global PRIOR_W, PRIOR_H
     PRIOR_W, PRIOR_H = w_med, h_med
 
-    # Optimizer, LR scheduler(s), AMP scaler, early stopping — unchanged
     opt = optim.SGD(model.parameters(), lr=2e-2, momentum=0.9, weight_decay=5e-4)
     TOTAL_EPOCHS = 30
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=TOTAL_EPOCHS, eta_min=1e-4)
     scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
     early = EarlyStoppingMax(patience=12, min_delta=0.0)
 
     best_val_iou = -1.0
     best_path = "best_val_iou.pt"
-
     history = {"epoch": [], "lr": [], "train_loss": [], "val_loss": [], "val_iou": []}
 
     for epoch in range(TOTAL_EPOCHS):
@@ -449,7 +425,6 @@ def main():
 
         train_loss, train_iou = train_one_epoch(model, train_loader, device, opt, scaler, loss_fn, max_norm=10)
         val_loss, val_iou = evaluate(model, val_loader, device, loss_fn)
-        scheduler.step()  # keep (unchanged)
 
         print(f"Epoch {epoch+1:03d} | lr {lr:.6f} | train {train_loss:.4f} | val {val_loss:.4f} | val_iou {val_iou:.4f}")
 
@@ -472,23 +447,25 @@ def main():
         model.load_state_dict(torch.load(best_path, map_location=device))
         print(f"Loaded best weights from {best_path} (best val_iou={best_val_iou:.4f})")
 
-    # Validation IoU (numpy) — unchanged (uses raw preds)
+    # ---- Decode before NumPy IoU summary ----
     model.eval()
+    decoded_preds = []
     with torch.no_grad():
-        preds = []
         for xb, _ in val_loader:
             xb = xb.to(device)
-            p = model(xb).cpu().numpy()
-            preds.append(p)
-    preds = np.concatenate(preds, axis=0)
-    ious = [iou_xywh_np(p, g) for p, g in zip(preds, Y_va)]
-    print("val IoU mean:", float(np.mean(ious)))
-    print("val IoU median:", float(np.median(ious)))
+            t = model(xb)
+            xywh = decode_head(t).cpu().numpy()
+            decoded_preds.append(xywh)
+    preds_decoded = np.concatenate(decoded_preds, axis=0)
 
-    # Visualization — unchanged (uses raw preds)
+    ious = [iou_xywh_np(p, g) for p, g in zip(preds_decoded, Y_va)]
+    print("val IoU mean (decoded):", float(np.mean(ious)))
+    print("val IoU median (decoded):", float(np.median(ious)))
+
+    # ---- Visualization with decoded predictions ----
     for i in range(min(5, len(X_va))):
         img = (X_va[i]*255).astype(np.uint8)
-        pred = preds[i]; gt = Y_va[i]
+        pred = preds_decoded[i]; gt = Y_va[i]
         plt.figure()
         plt.imshow(img)
         H, W, _ = img.shape
@@ -500,7 +477,7 @@ def main():
                                               fill=False, edgecolor=color, linewidth=2))
         draw_box(gt,  'g')
         draw_box(pred,'r')
-        plt.title(f"IoU: {iou_xywh_np(pred,gt):.3f}")
+        plt.title(f"IoU (decoded): {iou_xywh_np(pred,gt):.3f}")
         plt.axis('off'); plt.show()
 
 if __name__ == "__main__":
