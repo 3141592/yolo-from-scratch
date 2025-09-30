@@ -12,16 +12,18 @@ import numpy as np
 from io import BytesIO
 from PIL import Image
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
+from torchsummary import summary
 
 from datasets import load_dataset
 from skimage.measure import label, regionprops
 
-DEBUG = False
+DEBUG = True
 
 # ---------- Helpers (ported 1:1) ----------
 def mask_bytes_to_boxes(mask_bytes):
@@ -65,6 +67,14 @@ def iou_xywh_np(pred, gt):
     union = ap + ag - inter_area
     if union <= 0: return 0.0
     return float(inter_area / union)
+
+def draw_xywh(ax, xywh, W, H, color, label=None):
+    xc, yc, w, h = xywh.tolist()
+    x1 = int((xc - w/2) * W); y1 = int((yc - h/2) * H)
+    x2 = int((xc + w/2) * W); y2 = int((yc + h/2) * H)
+    ax.add_patch(patches.Rectangle((x1,y1), x2-x1, y2-y1,
+                                   fill=False, edgecolor=color, linewidth=2, label=label))
+    ax.scatter([xc*W],[yc*H], s=24, c=color)
 
 @torch.no_grad()
 def iou_xywh_torch(pred, gt):
@@ -167,14 +177,15 @@ class YOLOToyRegressor(nn.Module):
             nn.Flatten(),
             nn.Linear(flat, 4096),
             nn.LeakyReLU(0.1, inplace=True),
-            nn.Dropout(0.5),
+            #nn.Dropout(0.5),
             nn.Linear(4096, 4)  # [xc,yc,w,h]
         )
 
     def forward(self, x):
         x = self.feat(x)
         x = self.fc(x)
-        return x
+        # keep [xc,yc,w,h] in 0..1 so IoU/math stays sane
+        return torch.sigmoid(x)
 
 # ---------- Training / Eval ----------
 def yolo_v1_lr_schedule(epoch, total_epochs=30, warmup=3):
@@ -212,6 +223,8 @@ def evaluate(model, loader, device, loss_fn):
     for xb, yb in loader:
         xb = xb.to(device, non_blocking=True)
         yb = yb.to(device, non_blocking=True)
+        #preds = model(xb)
+        preds = model(xb).clamp(0.0, 1.0)
         preds = model(xb)
         loss = loss_fn(preds, yb)
         total_loss += loss.item() * xb.size(0)
@@ -230,12 +243,22 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0):
         opt.zero_grad(set_to_none=True)
         with torch.amp.autocast(enabled=torch.cuda.is_available(), device_type="cuda"):
             preds = model(xb)
+            #preds = model(xb).clamp(0.0, 1.0)
             if DEBUG:
                 # [xc,yc,w,h]
                 print(f"[xc,yc,w,h]: {preds}>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 
             loss = loss_fn(preds, yb)
         scaler.scale(loss).backward()
+
+        # debug grads
+        with torch.no_grad():
+            total_norm = torch.sqrt(sum(p.grad.detach().float().pow(2).sum() for p in model.parameters() if p.grad is not None))
+            head = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
+            gmean = head.weight.grad.detach().float().mean().item() if head.weight.grad is not None else float('nan')
+            gstd  = head.weight.grad.detach().float().std().item()  if head.weight.grad is not None else float('nan')
+        if DEBUG: print(f"[dbg] grad_norm={total_norm.item():.2e} head_grad mean/std={gmean:.2e}/{gstd:.2e}")
+
         if max_norm is not None:
             scaler.unscale_(opt)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm)
@@ -257,7 +280,10 @@ def main():
     )
     train = ds["train"]; val = ds["val"]
 
-    sample_list = [train[i] for i in range(16)]
+    #sample_list = [train[i] for i in range(16)]
+    N = min(256, len(train))
+    sample_list = [train[i] for i in range(N)]
+
     X, Y = get_samples_from_dataset(sample_list, max_samples=16)
     idx = int(0.8*len(X))
     X_tr, Y_tr = X[:idx], Y[:idx]
@@ -269,11 +295,22 @@ def main():
     X_va_t = torch.from_numpy(np.transpose(X_va, (0,3,1,2))).contiguous()
     Y_va_t = torch.from_numpy(Y_va).contiguous()
 
-    train_loader = DataLoader(TensorDataset(X_tr_t, Y_tr_t), batch_size=1, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(TensorDataset(X_va_t, Y_va_t), batch_size=1, shuffle=False, num_workers=2, pin_memory=True)
+    # --- Sanity: do targets have variety? Is the model predicting their mean?
+    if DEBUG:
+        print("Y_tr mean/std:", Y_tr_t.float().mean(0), Y_tr_t.float().std(0))
+        print("Y_va mean/std:", Y_va_t.float().mean(0), Y_va_t.float().std(0))
+
+    train_loader = DataLoader(TensorDataset(X_tr_t, Y_tr_t), batch_size=8, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader   = DataLoader(TensorDataset(X_va_t, Y_va_t), batch_size=8, shuffle=False, num_workers=2, pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = YOLOToyRegressor().to(device)
+    with torch.no_grad():
+        last = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
+        # Start near center with a modest box (20% of width/height)
+        last.bias.copy_(torch.tensor([0.5, 0.5, 0.2, 0.2], device=last.bias.device))
+    summary(model, input_size=(3, 448, 448), device=str(device))
+
     loss_fn = nn.SmoothL1Loss(reduction="mean")
     opt = optim.SGD(model.parameters(), lr=3e-3, momentum=0.9, weight_decay=5e-4)
     plateau = optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4, min_lr=1e-6)
@@ -289,9 +326,10 @@ def main():
 
     for epoch in range(TOTAL_EPOCHS):
         # epoch-wise LR schedule
-        lr = yolo_v1_lr_schedule(epoch, total_epochs=TOTAL_EPOCHS, warmup=3)
-        for pg in opt.param_groups:
-            pg["lr"] = lr
+        #lr = yolo_v1_lr_schedule(epoch, total_epochs=TOTAL_EPOCHS, warmup=3)
+        #for pg in opt.param_groups:
+        #    pg["lr"] = lr
+        lr = opt.param_groups[0]["lr"]
 
         train_loss = train_one_epoch(model, train_loader, device, opt, scaler, loss_fn)
         val_loss, val_iou = evaluate(model, val_loader, device, loss_fn)
@@ -334,42 +372,50 @@ def main():
     print("pred mean:", P.mean(0), "pred std:", P.std(0))
     print("tgt  mean:", T.mean(0), "tgt  std:", T.std(0))
 
-    if DEBUG:
-        sys.exit()
+    val_ds = val_loader.dataset
 
+    model.eval()
     with torch.no_grad():
-        for i in range(min(5, len(X_va))):
-            # 1) Get the exact tensor you would feed the model
-            # If your model expects CHW float in [0,1] and normalized, do that here.
-            img_np = X_va[i]                      # (H,W,3) in [0,1]?
-            H, W, _ = img_np.shape
-
-            # build model input exactly like your val pipeline
-            x_t = torch.from_numpy(img_np).permute(2,0,1).unsqueeze(0).to(device)  # (1,3,H,W)
-            # apply same normalization as training/val transforms if used
-
-            # 2) Predict
-            pred = model(x_t)[0].detach().cpu().float().numpy()  # [xc,yc,w,h] in [0,1]
+        for i in range(min(5, len(val_ds))):
+            xb, yb = val_ds[i]                 # xb: (3,H,W) in [0,1], yb: (4,)
+            H, W = xb.shape[-2:]
+            pred = model(xb.unsqueeze(0).to(device))[0].cpu().float()  # (4,)
             # [xc,yc,w,h]
             print(f"[xc,yc,w,h]: {i} {pred}")
 
-            # 3) Draw
-            def draw_box_xywh(ax, xywh, color):
-                xc, yc, w, h = xywh
-                x1 = int((xc - 0.5*w) * W); x2 = int((xc + 0.5*w) * W)
-                y1 = int((yc - 0.5*h) * H); y2 = int((yc + 0.5*h) * H)
-                ax.add_patch(plt.Rectangle((x1,y1), x2-x1, y2-y1,
-                                           fill=False, edgecolor=color, linewidth=2))
-                ax.scatter([xc*W], [yc*H], s=24)  # draw center for sanity
+            #iou = iou_xywh_torch(pred, yb)
+            iou = iou_xywh_torch(pred.unsqueeze(0), yb.unsqueeze(0))
 
-            gt = Y_va[i]  # must be normalized [xc,yc,w,h] for the same image
+            fig, ax = plt.subplots(figsize=(6,6))
+            ax.imshow(xb.permute(1,2,0).cpu().numpy())  # direct show, no denorm
+            draw_xywh(ax, yb,   W, H, 'g', label='GT')
+            draw_xywh(ax, pred, W, H, 'r', label='Pred')
+            ax.set_title(f"idx={i} | IoU: {iou:.3f}")
+            ax.axis('off')
+            ax.legend(loc='upper right')
+            plt.show()
 
-            plt.figure()
-            plt.imshow((img_np*255).astype(np.uint8))  # if already in [0,1]
-            draw_box_xywh(plt.gca(), gt,   'g')
-            draw_box_xywh(plt.gca(), pred, 'r')
-            plt.title(f"IoU: {iou_xywh_np(pred, gt):.3f}")
-            plt.axis('off'); plt.show()
+    last = None
+    for n,m in model.named_modules():
+        if isinstance(m, torch.nn.Linear) and m.out_features == 4:
+            last = m
+    print("last weight std:", last.weight.data.std().item())
+    print("last bias:", last.bias.data.cpu().numpy())
+
+    acts = {}
+    def hook(_, __, out): acts['pre_act'] = out.detach().cpu()
+
+    h = last.register_forward_hook(hook)
+
+    with torch.no_grad():
+        for k in range(3):
+            xb,_ = val_loader.dataset[k]
+            xb = xb.unsqueeze(0).to(device)
+            _ = model(xb)
+            print(f"[{k}] pre_act mean={acts['pre_act'].mean().item():.4f} "
+                  f"std={acts['pre_act'].std().item():.4f}  vals={acts['pre_act'].numpy()}")
+    h.remove()
+
 
 
 if __name__ == "__main__":

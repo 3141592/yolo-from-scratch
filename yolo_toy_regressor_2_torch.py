@@ -180,7 +180,7 @@ def Conv2D(in_ch, out_ch, k, s=1):
         nn.LeakyReLU(0.1, inplace=True),
     )
 
-class YOLOToyRegressor(nn.Module):
+class YOLOcoyRegressor(nn.Module):
     def __init__(self):
         super().__init__()
         pool = lambda: nn.MaxPool2d(kernel_size=2, stride=2)
