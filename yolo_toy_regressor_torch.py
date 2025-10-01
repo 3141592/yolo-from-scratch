@@ -19,10 +19,13 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from torchsummary import summary
+import torch.nn.functional as F
 
 from datasets import load_dataset
 from skimage.measure import label, regionprops
 
+# --- debug toggles ---
+OVERFIT_ONE = True   # set True to run the 1-image sanity check and exit
 DEBUG = True
 
 # ---------- Helpers (ported 1:1) ----------
@@ -77,8 +80,52 @@ def draw_xywh(ax, xywh, W, H, color, label=None):
     ax.scatter([xc*W],[yc*H], s=24, c=color)
 
 @torch.no_grad()
+def _iou_of(model, x, y, device):
+    model.eval()
+    p = model(x.to(device))
+    iou = iou_xywh_torch(decode_xywh(p).float(), y.float())
+    return torch.as_tensor(iou).mean().item()    
+
+def overfit_one(model, loss_fn, x0, y0, device, steps=1000, lr=1e-3, wd=0.0):
+    """
+    Overfit a single (image, box) pair. Expect IoU -> 0.9+ quickly.
+    Uses a fresh optimizer & no AMP to avoid interference.
+    """
+    model.train()
+    # freeze all but the very last linear layer
+    for p in model.parameters(): p.requires_grad = False
+    last = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
+    for p in last.parameters(): p.requires_grad = True
+    opt = torch.optim.AdamW(last.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.99))
+
+    x0 = x0.to(device)
+    y0 = y0.to(device)
+
+    print(f"[overfit-one] start IoU={_iou_of(model, x0, y0, device):.4f}")
+    for t in range(1, steps+1):
+        opt.zero_grad(set_to_none=True)
+        raw = model(x0)
+        loss  = loss_fn(raw, y0)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(last.parameters(), 0.5)
+        opt.step()
+
+        if t % 50 == 0 or t <= 5:
+            iou = _iou_of(model, x0, y0, device)
+            pm  = raw.detach().float().mean(0)
+            print(f"[overfit-one] step {t:04d}  loss={loss.item():.5f}  IoU={iou:.4f}  "
+                  f"pred≈[{pm[0]:.3f},{pm[1]:.3f},{pm[2]:.3f},{pm[3]:.3f}]")
+            pp = decode_xywh(raw.detach().float())[0]
+            tt = y0.detach().float()[0]
+            print(
+                f"[overfit-one] {t:04d}  loss={loss.item():.5f}  IoU={iou:.4f}\n"
+                f"    pred=[{pp[0]:.3f},{pp[1]:.3f},{pp[2]:.3f},{pp[3]:.3f}]  "
+                f"tgt=[{tt[0]:.3f},{tt[1]:.3f},{tt[2]:.3f},{tt[3]:.3f}]"
+            )
+    print(f"[overfit-one] final IoU={_iou_of(model, x0, y0, device):.4f}")
+
+@torch.no_grad()
 def iou_xywh_torch(pred, gt):
-    # pred, gt: [B,4] in [xc,yc,w,h] normalized
     p = torch.stack([
         pred[:,0] - 0.5*pred[:,2],
         pred[:,1] - 0.5*pred[:,3],
@@ -97,9 +144,9 @@ def iou_xywh_torch(pred, gt):
     inter_area = inter_wh[:,0] * inter_wh[:,1]
     area_p = (p[:,2]-p[:,0]) * (p[:,3]-p[:,1])
     area_g = (g[:,2]-g[:,0]) * (g[:,3]-g[:,1])
-    union  = area_p + area_g - inter_area
-    iou    = torch.where(union > 0, inter_area / union, torch.zeros_like(union))
-    return iou.mean().item()
+    union_area = area_p + area_g - inter_area
+    iou = (inter_area / union_area).clamp(0.0, 1.0)
+    return iou.reshape(-1)   # ensure it's always a 1D tensor
 
 def get_samples_from_dataset(dataset, max_samples=500):
     X = []
@@ -183,11 +230,27 @@ class YOLOToyRegressor(nn.Module):
 
     def forward(self, x):
         x = self.feat(x)
-        x = self.fc(x)
-        # keep [xc,yc,w,h] in 0..1 so IoU/math stays sane
-        return torch.sigmoid(x)
+        # return raw logits: [x_logit, y_logit, w_log, h_log]
+        return self.fc(x)
 
 # ---------- Training / Eval ----------
+def yolo_single_box_loss(raw, targets):
+    """
+    raw: [...,4] = [x_logit,y_logit,w_log,h_log]
+    targets: [...,4] in [x,y,w,h] normalized
+    """
+    eps = 1e-6
+    # decode xy for loss; keep wh in log-space for loss stability
+    x = torch.sigmoid(raw[...,0])
+    y = torch.sigmoid(raw[...,1])
+    w_log = raw[...,2]
+    h_log = raw[...,3]
+    tx, ty, tw, th = targets[...,0], targets[...,1], targets[...,2], targets[...,3]
+    loss_xy = F.smooth_l1_loss(x, tx) + F.smooth_l1_loss(y, ty)
+    loss_wh = F.smooth_l1_loss(w_log, torch.log(tw + eps)) + \
+              F.smooth_l1_loss(h_log, torch.log(th + eps))
+    return 2.0 * loss_xy + 4.0 * loss_wh
+
 def yolo_v1_lr_schedule(epoch, total_epochs=30, warmup=3):
     if epoch < warmup:
         return 1e-3 + (1e-2 - 1e-3) * (epoch + 1) / max(1, warmup)
@@ -214,6 +277,15 @@ class EarlyStoppingMax:
             self.count += 1
         return improved, self.count >= self.patience
 
+def decode_xywh(raw):
+    # raw: [...,4] -> normalized xy and positive wh
+    x_logit, y_logit, w_log, h_log = raw[...,0], raw[...,1], raw[...,2], raw[...,3]
+    x = torch.sigmoid(x_logit)
+    y = torch.sigmoid(y_logit)
+    w = torch.exp(w_log).clamp_min(1e-6)  # positive
+    h = torch.exp(h_log).clamp_min(1e-6)
+    return torch.stack([x, y, w, h], dim=-1)
+
 @torch.no_grad()
 def evaluate(model, loader, device, loss_fn):
     model.eval()
@@ -223,10 +295,9 @@ def evaluate(model, loader, device, loss_fn):
     for xb, yb in loader:
         xb = xb.to(device, non_blocking=True)
         yb = yb.to(device, non_blocking=True)
-        #preds = model(xb)
-        preds = model(xb).clamp(0.0, 1.0)
-        preds = model(xb)
-        loss = loss_fn(preds, yb)
+        preds_raw = model(xb)
+        loss = loss_fn(preds_raw, yb)
+        preds = decode_xywh(preds_raw)
         total_loss += loss.item() * xb.size(0)
         total_iou  += iou_xywh_torch(preds, yb) * xb.size(0)
         n += xb.size(0)
@@ -241,14 +312,14 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0):
         yb = yb.to(device, non_blocking=True)
 
         opt.zero_grad(set_to_none=True)
-        with torch.amp.autocast(enabled=torch.cuda.is_available(), device_type="cuda"):
-            preds = model(xb)
-            #preds = model(xb).clamp(0.0, 1.0)
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            preds_raw = model(xb)
             if DEBUG:
                 # [xc,yc,w,h]
+                preds = decode_xywh(preds_raw)
                 print(f"[xc,yc,w,h]: {preds}>>>>>>>>>>>>>>>>>>>>>>>>>>>")
 
-            loss = loss_fn(preds, yb)
+            loss = loss_fn(preds_raw, yb)
         scaler.scale(loss).backward()
 
         # debug grads
@@ -262,6 +333,10 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0):
         if max_norm is not None:
             scaler.unscale_(opt)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+
+        # Clip gradients (L2 norm capped at 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
         scaler.step(opt)
         scaler.update()
 
@@ -279,12 +354,13 @@ def main():
         }
     )
     train = ds["train"]; val = ds["val"]
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    #sample_list = [train[i] for i in range(16)]
+    #sample_list = [train[i] for i in range(128)]
     N = min(256, len(train))
     sample_list = [train[i] for i in range(N)]
 
-    X, Y = get_samples_from_dataset(sample_list, max_samples=16)
+    X, Y = get_samples_from_dataset(sample_list, max_samples=128)
     idx = int(0.8*len(X))
     X_tr, Y_tr = X[:idx], Y[:idx]
     X_va, Y_va = X[idx:], Y[idx:]
@@ -295,15 +371,29 @@ def main():
     X_va_t = torch.from_numpy(np.transpose(X_va, (0,3,1,2))).contiguous()
     Y_va_t = torch.from_numpy(Y_va).contiguous()
 
+    if OVERFIT_ONE:
+        # pick one training example
+        x0 = X_tr_t[0:1]
+        y0 = Y_tr_t[0:1]
+        # fresh model + init (reuse your existing init code)
+        model = YOLOToyRegressor().to(device)
+        with torch.no_grad():
+            last = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
+            torch.nn.init.normal_(last.weight, mean=0.0, std=1e-3)
+            # x,y logits ~ 0.0 => sigmoid ~ 0.5; w,h logs ~ log(0.2)
+            last.bias.copy_(torch.tensor([0.0, 0.0, -1.609, -1.609], device=last.bias.device))
+        # run the harness and exit
+        overfit_one(model, yolo_single_box_loss, x0, y0, device, steps=600, lr=1e-2, wd=0.0)
+        return
+
     # --- Sanity: do targets have variety? Is the model predicting their mean?
     if DEBUG:
         print("Y_tr mean/std:", Y_tr_t.float().mean(0), Y_tr_t.float().std(0))
         print("Y_va mean/std:", Y_va_t.float().mean(0), Y_va_t.float().std(0))
 
-    train_loader = DataLoader(TensorDataset(X_tr_t, Y_tr_t), batch_size=8, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(TensorDataset(X_va_t, Y_va_t), batch_size=8, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(TensorDataset(X_tr_t, Y_tr_t), batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
+    val_loader   = DataLoader(TensorDataset(X_va_t, Y_va_t), batch_size=32, shuffle=False, num_workers=2, pin_memory=True)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = YOLOToyRegressor().to(device)
     with torch.no_grad():
         last = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
@@ -311,8 +401,10 @@ def main():
         last.bias.copy_(torch.tensor([0.5, 0.5, 0.2, 0.2], device=last.bias.device))
     summary(model, input_size=(3, 448, 448), device=str(device))
 
-    loss_fn = nn.SmoothL1Loss(reduction="mean")
-    opt = optim.SGD(model.parameters(), lr=3e-3, momentum=0.9, weight_decay=5e-4)
+    loss_fn = yolo_single_box_loss
+
+    opt = optim.AdamW(model.parameters(), lr=3e-3, weight_decay=1e-4, betas=(0.9, 0.999))
+
     plateau = optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4, min_lr=1e-6)
     scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
 
