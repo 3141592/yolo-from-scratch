@@ -25,7 +25,7 @@ from datasets import load_dataset
 from skimage.measure import label, regionprops
 
 # --- debug toggles ---
-OVERFIT_ONE = True   # set True to run the 1-image sanity check and exit
+OVERFIT_ONE = False   # set True to run the 1-image sanity check and exit
 DEBUG = True
 
 # ---------- Helpers (ported 1:1) ----------
@@ -290,18 +290,21 @@ def decode_xywh(raw):
 def evaluate(model, loader, device, loss_fn):
     model.eval()
     total_loss = 0.0
-    total_iou = 0.0
-    n = 0
-    for xb, yb in loader:
-        xb = xb.to(device, non_blocking=True)
-        yb = yb.to(device, non_blocking=True)
-        preds_raw = model(xb)
-        loss = loss_fn(preds_raw, yb)
-        preds = decode_xywh(preds_raw)
-        total_loss += loss.item() * xb.size(0)
-        total_iou  += iou_xywh_torch(preds, yb) * xb.size(0)
-        n += xb.size(0)
-    return total_loss / n, total_iou / n
+    ious = []
+
+    with torch.no_grad():
+        for xb, yb in loader:
+            xb, yb = xb.to(device), yb.to(device)
+            raw = model(xb)
+            loss = loss_fn(raw, yb)
+            total_loss += loss.item() * xb.size(0)
+
+            preds = decode_xywh(raw)
+            ious.extend(iou_xywh_torch(preds.float(), yb.float()).cpu().tolist())
+
+    avg_loss = total_loss / len(loader.dataset)
+    avg_iou = sum(ious) / len(ious) if ious else 0.0
+    return float(avg_loss), float(avg_iou)
 
 def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0):
     model.train()
@@ -427,7 +430,13 @@ def main():
         val_loss, val_iou = evaluate(model, val_loader, device, loss_fn)
         plateau.step(val_loss)
 
-        print(f"Epoch {epoch+1:03d} | lr {lr:.6f} | train {train_loss:.4f} | val {val_loss:.4f} | val_iou {val_iou:.4f}")
+        print(
+            f"Epoch {epoch+1:03d} "
+            f"| lr {lr:.6f} "
+            f"| train {train_loss:.4f} "
+            f"| val {val_loss:.4f} "
+            f"| val_iou {val_iou:.4f}"
+        )
 
         # record history
         history["epoch"].append(epoch + 1)
@@ -482,7 +491,7 @@ def main():
             ax.imshow(xb.permute(1,2,0).cpu().numpy())  # direct show, no denorm
             draw_xywh(ax, yb,   W, H, 'g', label='GT')
             draw_xywh(ax, pred, W, H, 'r', label='Pred')
-            ax.set_title(f"idx={i} | IoU: {iou:.3f}")
+            ax.set_title(f"idx={i} | IoU: {float(torch.as_tensor(iou).mean().item()):.3f}")
             ax.axis('off')
             ax.legend(loc='upper right')
             plt.show()
