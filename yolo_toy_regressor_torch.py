@@ -32,6 +32,9 @@ CONFIG = {
     "OVERFIT_ONE": False,               # Run 1-image sanity check & exit
     "DEBUG": True,                      # Verbose logs & gradient prints
 
+    # AMP automatic mixed precision training
+    "USE_AMP": False,
+
     # Data & Preprocessing
     "IMAGE_SIZE": 448,                  # Resize to (IMAGE_SIZE, IMAGE_SIZE)
     "MAX_SAMPLES": 128,                 # Max samples to draw from parquet
@@ -46,7 +49,7 @@ CONFIG = {
 
     # Model Init
     # Default bias to start predictions roughly centered with a modest box
-    "INIT_BIAS": [0.5, 0.5, 0.2, 0.2],  # [xc,yc,w,h] (normalized)
+    "INIT_BIAS": [0.0, 0.0, -1.3862944, -1.3862944],
     # Overfit-one special bias (log-space for w/h handled in code below)
     "OVERFIT_BIAS_LOG": [0.0, 0.0, -1.609, -1.609],  # ~log(0.2) for w,h
 
@@ -82,6 +85,7 @@ CONFIG = {
 # convenience flags
 OVERFIT_ONE = CONFIG["OVERFIT_ONE"]
 DEBUG = CONFIG["DEBUG"]
+USE_AMP = CONFIG["USE_AMP"]
 
 # ---------- Helpers (ported 1:1, with CONFIG where relevant) ----------
 def mask_bytes_to_boxes(mask_bytes):
@@ -134,7 +138,17 @@ def draw_xywh(ax, xywh, W, H, color, label=None):
                                    fill=False, edgecolor=color, linewidth=2, label=label))
     ax.scatter([xc*W],[yc*H], s=24, c=color)
 
-@torch.no_grad()
+    # ---- debug: what are we actually drawing? ----
+    if DEBUG:
+        # normalized box and pixel corners
+        print(
+            f"[dbg/draw] {label or 'box'} "
+            f"xywh_norm=({xc:.6f},{yc:.6f},{w:.6f},{h:.6f})  "
+            f"corners_px=({x1},{y1})→({x2},{y2})  size_px=({x2-x1},{y2-y1})  W×H=({W},{H})"
+        )
+        if (x2 - x1) <= 2 or (y2 - y1) <= 2:
+            print("  [warn] drawn box ≤2 px in at least one dimension (looks like a dot).")
+
 def _iou_of(model, x, y, device):
     model.eval()
     p = model(x.to(device))
@@ -335,13 +349,20 @@ class EarlyStoppingMax:
         return improved, self.count >= self.patience
 
 def decode_xywh(raw):
-    # raw: [...,4] -> normalized xy and positive wh
-    x_logit, y_logit, w_log, h_log = raw[...,0], raw[...,1], raw[...,2], raw[...,3]
-    x = torch.sigmoid(x_logit)
-    y = torch.sigmoid(y_logit)
-    w = torch.exp(w_log).clamp_min(1e-6)  # positive
-    h = torch.exp(h_log).clamp_min(1e-6)
+    zx, zy, zw, zh = raw.unbind(-1)
+    x = torch.sigmoid(zx)
+    y = torch.sigmoid(zy)
+    w = torch.sigmoid(zw)
+    h = torch.sigmoid(zh)
+    # clamp away from exact 0/1 to avoid 0-area and weird IoU divisions
+    eps = 1e-6
+    w = torch.clamp(w, eps, 1.0 - eps)
+    h = torch.clamp(h, eps, 1.0 - eps)
     return torch.stack([x, y, w, h], dim=-1)
+
+def _stat(x):  # tiny helper for prints
+    x = x.detach()
+    return f"finite={torch.isfinite(x).all().item()} min={x.min().item():.3e} max={x.max().item():.3e} mean={x.mean().item():.3e}"
 
 @torch.no_grad()
 def evaluate(model, loader, device, loss_fn):
@@ -364,46 +385,130 @@ def evaluate(model, loader, device, loss_fn):
     return float(avg_loss), float(avg_iou)
 
 def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=None):
+    # DEBUG 001
+    USE_AMP = False        # make sure this is False
+    model.float()          # force params to fp32
+
+    # inside train_one_epoch(), before the loop:
+    print("[dtype] model head W:", next(model.parameters()).dtype)
+    # END DEBUG 001
+
     model.train()
     running = 0.0
     n = 0
-    for xb, yb in loader:
+
+    # locate the 4-dim head once
+    last = None
+    for m in model.modules():
+        if isinstance(m, nn.Linear) and getattr(m, "out_features", None) == 4:
+            last = m
+    assert last is not None, "Could not find final Linear(out_features=4) head."
+
+    did_probe = False
+
+    first_bad_step = None
+
+    for step, (xb, yb) in enumerate(loader, start=1):
         xb = xb.to(device, non_blocking=True)
         yb = yb.to(device, non_blocking=True)
 
+        # DEBUG 001
+        xb = xb.to(device).float()
+        yb = yb.to(device).float()
+        # END DEBUG 001
+
         opt.zero_grad(set_to_none=True)
-        with torch.amp.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
-            preds_raw = model(xb)
-            if DEBUG:
-                preds = decode_xywh(preds_raw)
+
+        # forward + loss under autocast
+        with torch.amp.autocast(device_type="cuda", enabled=USE_AMP):
+            raw   = model(xb)
+            preds = decode_xywh(raw)
+            loss  = loss_fn(raw, yb)
+
+        # DEBUG 001
+        if DEBUG and not did_probe:
+            print("[dtype] xb:", xb.dtype, "raw:", raw.dtype, "preds:", preds.dtype, "yb:", yb.dtype)
+        # END DEBUG 001
+
+        # (optional) peek at decoded preds for the first batch
+        if DEBUG and not did_probe:
+            with torch.no_grad():
+                preds = decode_xywh(raw)
                 print(f"[dbg] preds [xc,yc,w,h] batch head: {preds[:2]}")
 
-            loss = loss_fn(preds_raw, yb)
+        # snapshot params before backward (first batch only)
+        if DEBUG and not did_probe:
+            w_before = last.weight.detach().clone()
+            b_before = last.bias.detach().clone()
 
-        scaler.scale(loss).backward()
+        # print only for step==1 (sanity) or when something goes non-finite
+        should_print = (DEBUG and step == 1)
 
-        if max_norm is not None:
-            scaler.unscale_(opt)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        non_finite = (
+            not torch.isfinite(raw).all()
+            or not torch.isfinite(preds).all()
+            or not torch.isfinite(loss)
+        )
 
-        scaler.step(opt)
-        scaler.update()
+        if non_finite:
+            should_print = True
+            first_bad_step = first_bad_step or step  # remember the earliest offender
 
-        # optional grad debug (after unscale)
-        if DEBUG:
-            with torch.no_grad():
-                total_norm = torch.sqrt(sum(
-                    p.grad.detach().float().pow(2).sum()
-                    for p in model.parameters() if p.grad is not None
-                ))
-                head = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
-                gmean = head.weight.grad.detach().float().mean().item() if head.weight.grad is not None else float('nan')
-                gstd  = head.weight.grad.detach().float().std().item()  if head.weight.grad is not None else float('nan')
-            print(f"[dbg] grad_norm={total_norm.item():.2e} head_grad mean/std={gmean:.2e}/{gstd:.2e}")
+        if should_print:
+            print("TRIPWIRE")
+            print(f"[dbg] step={step}")
+            print("[dbg] xb:", _stat(xb))
+            print("[dbg] yb:", _stat(yb))
+            print("[dbg] raw:", _stat(raw))
+            print("[dbg] preds:", _stat(preds))
+            print("[dbg] loss:", loss.detach().item())
+
+        # tripwire: skip update on bad batch (or raise to halt)
+        if non_finite:
+            print(f"[stop] non-finite detected at step={step} — skipping optimizer step")
+            continue
+
+        if (not torch.isfinite(raw).all()
+            or not torch.isfinite(preds).all()
+            or not torch.isfinite(loss)):
+            print("[stop] non-finite detected — skipping this batch")
+            opt.zero_grad(set_to_none=True)
+            continue
+
+        if scaler is not None:
+            # --- AMP path ---
+            scaler.scale(loss).backward()
+            if max_norm is not None:
+                scaler.unscale_(opt)
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            scaler.step(opt)
+            scaler.update()
+        else:
+            # --- normal FP32 path ---
+            loss.backward()
+            if max_norm is not None:
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            opt.step()
+
+        # first-batch grad norms (unscaled)
+        if DEBUG and not did_probe:
+            gw = (last.weight.grad.detach().norm().item()
+                  if last.weight.grad is not None else float("nan"))
+            gb = (last.bias.grad.detach().norm().item()
+                  if last.bias.grad is not None else float("nan"))
+            print(f"[dbg/train] grad||W||={gw:.4e}  grad||b||={gb:.4e}")
+
+        # did params move? (first batch only)
+        if DEBUG and not did_probe:
+            dW = (last.weight.detach() - w_before).norm().item()
+            dB = (last.bias.detach()   - b_before).norm().item()
+            print(f"[dbg/train] Δ||W||={dW:.4e}  Δ||b||={dB:.4e}  loss={loss.item():.6f}")
+            did_probe = True
 
         running += loss.item() * xb.size(0)
         n += xb.size(0)
-    return running / n
+
+    return running / max(1, n)
 
 def main():
     # --- Load data (parquet paths from CONFIG) ---
@@ -495,7 +600,8 @@ def main():
     plateau = optim.lr_scheduler.ReduceLROnPlateau(
         opt, mode="min", factor=CONFIG["LR_FACTOR"], patience=CONFIG["LR_PATIENCE"], min_lr=CONFIG["LR_MIN"]
     )
-    scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
+
+    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available()) if USE_AMP else None
 
     TOTAL_EPOCHS = CONFIG["TOTAL_EPOCHS"]
     early = EarlyStoppingMax(patience=CONFIG["EARLY_PATIENCE"], min_delta=CONFIG["EARLY_MIN_DELTA"])
