@@ -1,4 +1,4 @@
-# yolo_toy_regressor_2_torch.py
+# yolo_toy_regressor_torch.py
 # PyTorch port (with history recorder) of your minimal single-box regressor.
 # - Uses SmoothL1Loss (Huber), AMP, ReduceLROnPlateau
 # - EarlyStopping on val_iou (maximize)
@@ -24,11 +24,66 @@ import torch.nn.functional as F
 from datasets import load_dataset
 from skimage.measure import label, regionprops
 
-# --- debug toggles ---
-OVERFIT_ONE = False   # set True to run the 1-image sanity check and exit
-DEBUG = True
+# =======================
+# Global Configuration
+# =======================
+CONFIG = {
+    # Debug / Control
+    "OVERFIT_ONE": False,               # Run 1-image sanity check & exit
+    "DEBUG": True,                      # Verbose logs & gradient prints
 
-# ---------- Helpers (ported 1:1) ----------
+    # Data & Preprocessing
+    "IMAGE_SIZE": 448,                  # Resize to (IMAGE_SIZE, IMAGE_SIZE)
+    "MAX_SAMPLES": 128,                 # Max samples to draw from parquet
+    "TRAIN_SPLIT": 0.8,                 # Train/validation split fraction
+    "TRAIN_PATH": "/home/roy/src/data/voc2012/train-00000-of-00001.parquet",
+    "VAL_PATH":   "/home/roy/src/data/voc2012/val-00000-of-00001.parquet",
+
+    # Dataloader
+    "BATCH_SIZE": 32,
+    "NUM_WORKERS": 2,
+    "PIN_MEMORY": True,
+
+    # Model Init
+    # Default bias to start predictions roughly centered with a modest box
+    "INIT_BIAS": [0.5, 0.5, 0.2, 0.2],  # [xc,yc,w,h] (normalized)
+    # Overfit-one special bias (log-space for w/h handled in code below)
+    "OVERFIT_BIAS_LOG": [0.0, 0.0, -1.609, -1.609],  # ~log(0.2) for w,h
+
+    # Overfit-One harness
+    "OVERFIT_STEPS": 600,
+    "OVERFIT_LR": 1e-2,
+    "OVERFIT_WD": 0.0,
+
+    # Training
+    "TOTAL_EPOCHS": 5,
+    "MAX_GRAD_NORM": 1.0,               # gradient clipping L2 norm
+
+    # Optimizer
+    "OPTIMIZER": "AdamW",
+    "LR": 3e-3,
+    "WEIGHT_DECAY": 1e-4,
+    "BETAS": (0.9, 0.999),
+
+    # Scheduler (ReduceLROnPlateau on val_loss)
+    "LR_SCHEDULER": "ReduceLROnPlateau",
+    "LR_FACTOR": 0.5,
+    "LR_PATIENCE": 4,
+    "LR_MIN": 1e-6,
+
+    # Early Stopping (maximize val_iou)
+    "EARLY_PATIENCE": 12,
+    "EARLY_MIN_DELTA": 0.0,
+
+    # Checkpoint
+    "BEST_MODEL_PATH": "best_val_iou.pt",
+}
+
+# convenience flags
+OVERFIT_ONE = CONFIG["OVERFIT_ONE"]
+DEBUG = CONFIG["DEBUG"]
+
+# ---------- Helpers (ported 1:1, with CONFIG where relevant) ----------
 def mask_bytes_to_boxes(mask_bytes):
     im = Image.open(BytesIO(mask_bytes))
     arr = np.array(im)
@@ -84,9 +139,9 @@ def _iou_of(model, x, y, device):
     model.eval()
     p = model(x.to(device))
     iou = iou_xywh_torch(decode_xywh(p).float(), y.float())
-    return torch.as_tensor(iou).mean().item()    
+    return torch.as_tensor(iou).mean().item()
 
-def overfit_one(model, loss_fn, x0, y0, device, steps=1000, lr=1e-3, wd=0.0):
+def overfit_one(model, loss_fn, x0, y0, device, steps, lr, wd):
     """
     Overfit a single (image, box) pair. Expect IoU -> 0.9+ quickly.
     Uses a fresh optimizer & no AMP to avoid interference.
@@ -148,12 +203,15 @@ def iou_xywh_torch(pred, gt):
     iou = (inter_area / union_area).clamp(0.0, 1.0)
     return iou.reshape(-1)   # ensure it's always a 1D tensor
 
-def get_samples_from_dataset(dataset, max_samples=500):
+def get_samples_from_dataset(dataset):
+    """Returns X (N, H, W, 3 in [0,1]) and Y (N,4 normalized)."""
+    max_samples = CONFIG["MAX_SAMPLES"]
+    image_size = CONFIG["IMAGE_SIZE"]
     X = []
     Y = []
     for i, ex in enumerate(dataset):
         if i >= max_samples: break
-        img = Image.open(BytesIO(ex["image"]["bytes"])).convert("RGB").resize((448,448))
+        img = Image.open(BytesIO(ex["image"]["bytes"])).convert("RGB").resize((image_size, image_size))
         mask_boxes = mask_bytes_to_boxes(ex["mask"]["bytes"])
         if not mask_boxes:
             continue
@@ -163,7 +221,7 @@ def get_samples_from_dataset(dataset, max_samples=500):
         W, H = orig.size
         Y.append(box_to_xywh_norm(best, H, W))
         X.append(np.array(img).astype(np.float32)/255.0)
-    X = np.stack(X)  # (N, 448, 448, 3)
+    X = np.stack(X)  # (N, IMAGE_SIZE, IMAGE_SIZE, 3)
     Y = np.stack(Y)  # (N, 4)
     return X, Y
 
@@ -218,19 +276,18 @@ class YOLOToyRegressor(nn.Module):
             Conv2D(1024, 1024, 3),
         )
         with torch.no_grad():
-            dummy = torch.zeros(1, 3, 448, 448)
+            dummy = torch.zeros(1, 3, CONFIG["IMAGE_SIZE"], CONFIG["IMAGE_SIZE"])
             flat = self.feat(dummy).numel()
         self.fc = nn.Sequential(
             nn.Flatten(),
             nn.Linear(flat, 4096),
             nn.LeakyReLU(0.1, inplace=True),
-            #nn.Dropout(0.5),
-            nn.Linear(4096, 4)  # [xc,yc,w,h]
+            # nn.Dropout(0.5),
+            nn.Linear(4096, 4)  # [xc,yc,w,h] (logits for x,y; logs for w,h)
         )
 
     def forward(self, x):
         x = self.feat(x)
-        # return raw logits: [x_logit, y_logit, w_log, h_log]
         return self.fc(x)
 
 # ---------- Training / Eval ----------
@@ -240,7 +297,7 @@ def yolo_single_box_loss(raw, targets):
     targets: [...,4] in [x,y,w,h] normalized
     """
     eps = 1e-6
-    # decode xy for loss; keep wh in log-space for loss stability
+    # decode xy for loss; keep wh in log-space for stability
     x = torch.sigmoid(raw[...,0])
     y = torch.sigmoid(raw[...,1])
     w_log = raw[...,2]
@@ -306,7 +363,7 @@ def evaluate(model, loader, device, loss_fn):
     avg_iou = sum(ious) / len(ious) if ious else 0.0
     return float(avg_loss), float(avg_iou)
 
-def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0):
+def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=None):
     model.train()
     running = 0.0
     n = 0
@@ -315,56 +372,57 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=1.0):
         yb = yb.to(device, non_blocking=True)
 
         opt.zero_grad(set_to_none=True)
-        with torch.amp.autocast(device_type="cuda", enabled=False):
+        with torch.amp.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
             preds_raw = model(xb)
             if DEBUG:
-                # [xc,yc,w,h]
                 preds = decode_xywh(preds_raw)
-                print(f"[xc,yc,w,h]: {preds}>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+                print(f"[dbg] preds [xc,yc,w,h] batch head: {preds[:2]}")
 
             loss = loss_fn(preds_raw, yb)
-        scaler.scale(loss).backward()
 
-        # debug grads
-        with torch.no_grad():
-            total_norm = torch.sqrt(sum(p.grad.detach().float().pow(2).sum() for p in model.parameters() if p.grad is not None))
-            head = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
-            gmean = head.weight.grad.detach().float().mean().item() if head.weight.grad is not None else float('nan')
-            gstd  = head.weight.grad.detach().float().std().item()  if head.weight.grad is not None else float('nan')
-        if DEBUG: print(f"[dbg] grad_norm={total_norm.item():.2e} head_grad mean/std={gmean:.2e}/{gstd:.2e}")
+        scaler.scale(loss).backward()
 
         if max_norm is not None:
             scaler.unscale_(opt)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm)
 
-        # Clip gradients (L2 norm capped at 1.0)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
         scaler.step(opt)
         scaler.update()
+
+        # optional grad debug (after unscale)
+        if DEBUG:
+            with torch.no_grad():
+                total_norm = torch.sqrt(sum(
+                    p.grad.detach().float().pow(2).sum()
+                    for p in model.parameters() if p.grad is not None
+                ))
+                head = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
+                gmean = head.weight.grad.detach().float().mean().item() if head.weight.grad is not None else float('nan')
+                gstd  = head.weight.grad.detach().float().std().item()  if head.weight.grad is not None else float('nan')
+            print(f"[dbg] grad_norm={total_norm.item():.2e} head_grad mean/std={gmean:.2e}/{gstd:.2e}")
 
         running += loss.item() * xb.size(0)
         n += xb.size(0)
     return running / n
 
 def main():
-    # --- Load data (same parquet paths you used) ---
+    # --- Load data (parquet paths from CONFIG) ---
     ds = load_dataset(
         "parquet",
         data_files={
-            "train": "/home/roy/src/data/voc2012/train-00000-of-00001.parquet",
-            "val":   "/home/roy/src/data/voc2012/val-00000-of-00001.parquet",
+            "train": CONFIG["TRAIN_PATH"],
+            "val":   CONFIG["VAL_PATH"],
         }
     )
     train = ds["train"]; val = ds["val"]
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    #sample_list = [train[i] for i in range(128)]
-    N = min(256, len(train))
+    # Sample N from train, then split
+    N = min(256, len(train))  # keep your existing cap here; could also add to CONFIG if desired
     sample_list = [train[i] for i in range(N)]
 
-    X, Y = get_samples_from_dataset(sample_list, max_samples=128)
-    idx = int(0.8*len(X))
+    X, Y = get_samples_from_dataset(sample_list)
+    idx = int(CONFIG["TRAIN_SPLIT"] * len(X))
     X_tr, Y_tr = X[:idx], Y[:idx]
     X_va, Y_va = X[idx:], Y[idx:]
 
@@ -378,15 +436,23 @@ def main():
         # pick one training example
         x0 = X_tr_t[0:1]
         y0 = Y_tr_t[0:1]
-        # fresh model + init (reuse your existing init code)
+        # fresh model + init
         model = YOLOToyRegressor().to(device)
         with torch.no_grad():
             last = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
-            torch.nn.init.normal_(last.weight, mean=0.0, std=1e-3)
             # x,y logits ~ 0.0 => sigmoid ~ 0.5; w,h logs ~ log(0.2)
-            last.bias.copy_(torch.tensor([0.0, 0.0, -1.609, -1.609], device=last.bias.device))
+            bias = torch.tensor(CONFIG["OVERFIT_BIAS_LOG"], device=last.bias.device)
+            last.bias.copy_(bias)
+            torch.nn.init.normal_(last.weight, mean=0.0, std=1e-3)
         # run the harness and exit
-        overfit_one(model, yolo_single_box_loss, x0, y0, device, steps=600, lr=1e-2, wd=0.0)
+        overfit_one(
+            model,
+            yolo_single_box_loss,
+            x0, y0, device,
+            steps=CONFIG["OVERFIT_STEPS"],
+            lr=CONFIG["OVERFIT_LR"],
+            wd=CONFIG["OVERFIT_WD"],
+        )
         return
 
     # --- Sanity: do targets have variety? Is the model predicting their mean?
@@ -394,39 +460,57 @@ def main():
         print("Y_tr mean/std:", Y_tr_t.float().mean(0), Y_tr_t.float().std(0))
         print("Y_va mean/std:", Y_va_t.float().mean(0), Y_va_t.float().std(0))
 
-    train_loader = DataLoader(TensorDataset(X_tr_t, Y_tr_t), batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(TensorDataset(X_va_t, Y_va_t), batch_size=32, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(
+        TensorDataset(X_tr_t, Y_tr_t),
+        batch_size=CONFIG["BATCH_SIZE"],
+        shuffle=True,
+        num_workers=CONFIG["NUM_WORKERS"],
+        pin_memory=CONFIG["PIN_MEMORY"],
+    )
+    val_loader   = DataLoader(
+        TensorDataset(X_va_t, Y_va_t),
+        batch_size=CONFIG["BATCH_SIZE"],
+        shuffle=False,
+        num_workers=CONFIG["NUM_WORKERS"],
+        pin_memory=CONFIG["PIN_MEMORY"],
+    )
 
     model = YOLOToyRegressor().to(device)
     with torch.no_grad():
         last = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
-        # Start near center with a modest box (20% of width/height)
-        last.bias.copy_(torch.tensor([0.5, 0.5, 0.2, 0.2], device=last.bias.device))
-    summary(model, input_size=(3, 448, 448), device=str(device))
+        # For main training, start near center with a modest box
+        last.bias.copy_(torch.tensor(CONFIG["INIT_BIAS"], device=last.bias.device))
+
+    summary(model, input_size=(3, CONFIG["IMAGE_SIZE"], CONFIG["IMAGE_SIZE"]), device=str(device))
 
     loss_fn = yolo_single_box_loss
 
-    opt = optim.AdamW(model.parameters(), lr=3e-3, weight_decay=1e-4, betas=(0.9, 0.999))
+    opt = optim.AdamW(
+        model.parameters(),
+        lr=CONFIG["LR"],
+        weight_decay=CONFIG["WEIGHT_DECAY"],
+        betas=CONFIG["BETAS"],
+    )
 
-    plateau = optim.lr_scheduler.ReduceLROnPlateau(opt, mode="min", factor=0.5, patience=4, min_lr=1e-6)
+    plateau = optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode="min", factor=CONFIG["LR_FACTOR"], patience=CONFIG["LR_PATIENCE"], min_lr=CONFIG["LR_MIN"]
+    )
     scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
 
-    TOTAL_EPOCHS = 5
-    early = EarlyStoppingMax(patience=12, min_delta=0.0)
+    TOTAL_EPOCHS = CONFIG["TOTAL_EPOCHS"]
+    early = EarlyStoppingMax(patience=CONFIG["EARLY_PATIENCE"], min_delta=CONFIG["EARLY_MIN_DELTA"])
     best_val_iou = -1.0
-    best_path = "best_val_iou.pt"
+    best_path = CONFIG["BEST_MODEL_PATH"]
 
     # ---- Simple history recorder ----
     history = {"epoch": [], "lr": [], "train_loss": [], "val_loss": [], "val_iou": []}
 
     for epoch in range(TOTAL_EPOCHS):
-        # epoch-wise LR schedule
-        #lr = yolo_v1_lr_schedule(epoch, total_epochs=TOTAL_EPOCHS, warmup=3)
-        #for pg in opt.param_groups:
-        #    pg["lr"] = lr
         lr = opt.param_groups[0]["lr"]
 
-        train_loss = train_one_epoch(model, train_loader, device, opt, scaler, loss_fn)
+        train_loss = train_one_epoch(
+            model, train_loader, device, opt, scaler, loss_fn, max_norm=CONFIG["MAX_GRAD_NORM"]
+        )
         val_loss, val_iou = evaluate(model, val_loader, device, loss_fn)
         plateau.step(val_loss)
 
@@ -466,8 +550,9 @@ def main():
     with torch.no_grad():
         for i in range(len(X_va)):
             x = torch.from_numpy(X_va[i]).permute(2,0,1).unsqueeze(0).to(device)
-            p = model(x)[0].detach().cpu().float().numpy()
-            P.append(p); T.append(Y_va[i])
+            raw = model(x)[0].detach().cpu()
+            pred = decode_xywh(raw.unsqueeze(0))[0].cpu().float().numpy()
+            P.append(pred); T.append(Y_va[i])
     P, T = np.stack(P), np.stack(T)   # (N,4)
 
     print("pred mean:", P.mean(0), "pred std:", P.std(0))
@@ -480,11 +565,12 @@ def main():
         for i in range(min(5, len(val_ds))):
             xb, yb = val_ds[i]                 # xb: (3,H,W) in [0,1], yb: (4,)
             H, W = xb.shape[-2:]
-            pred = model(xb.unsqueeze(0).to(device))[0].cpu().float()  # (4,)
+            raw  = model(xb.unsqueeze(0).to(device))[0].cpu()
+            pred = decode_xywh(raw.unsqueeze(0))[0].cpu().float()      # (4,) decoded [xc,yc,w,h]
             # [xc,yc,w,h]
-            print(f"[xc,yc,w,h]: {i} {pred}")
+            if DEBUG:
+                print(f"[dbg] sample {i} raw pred [xc,yc,w,h]: {pred}")
 
-            #iou = iou_xywh_torch(pred, yb)
             iou = iou_xywh_torch(pred.unsqueeze(0), yb.unsqueeze(0))
 
             fig, ax = plt.subplots(figsize=(6,6))
@@ -516,8 +602,6 @@ def main():
             print(f"[{k}] pre_act mean={acts['pre_act'].mean().item():.4f} "
                   f"std={acts['pre_act'].std().item():.4f}  vals={acts['pre_act'].numpy()}")
     h.remove()
-
-
 
 if __name__ == "__main__":
     main()
