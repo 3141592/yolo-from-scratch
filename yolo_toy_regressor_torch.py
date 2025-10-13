@@ -22,6 +22,7 @@ from torchsummary import summary
 import torch.nn.functional as F
 
 from datasets import load_dataset
+from dataclasses import dataclass
 from skimage.measure import label, regionprops
 
 # =======================
@@ -64,7 +65,7 @@ CONFIG = {
 
     # Optimizer
     "OPTIMIZER": "AdamW",
-    "LR": 3e-3,
+    "LR": 1e-4,
     "WEIGHT_DECAY": 1e-4,
     "BETAS": (0.9, 0.999),
 
@@ -148,6 +149,31 @@ def draw_xywh(ax, xywh, W, H, color, label=None):
         )
         if (x2 - x1) <= 2 or (y2 - y1) <= 2:
             print("  [warn] drawn box ≤2 px in at least one dimension (looks like a dot).")
+
+@dataclass
+class EpochStats:
+    raw_min: float = float('inf')
+    raw_max: float = float('-inf')
+    raw_sum: float = 0.0
+    raw_count: int = 0
+    loss_sum: float = 0.0
+    n_samples: int = 0
+
+    def update_raw(self, raw: torch.Tensor):
+        r = raw.detach()
+        self.raw_min = min(self.raw_min, r.min().item())
+        self.raw_max = max(self.raw_max, r.max().item())
+        self.raw_sum += r.mean().item()
+        self.raw_count += 1
+
+    def update_loss(self, loss: torch.Tensor, batch_size: int):
+        self.loss_sum += loss.detach().item() * batch_size
+        self.n_samples += batch_size
+
+    def means(self):
+        raw_mean = (self.raw_sum / max(1, self.raw_count))
+        loss_mean = (self.loss_sum / max(1, self.n_samples))
+        return raw_mean, loss_mean
 
 def _iou_of(model, x, y, device):
     model.eval()
@@ -366,6 +392,8 @@ def _stat(x):  # tiny helper for prints
 
 @torch.no_grad()
 def evaluate(model, loader, device, loss_fn):
+    val_stats = EpochStats()
+    
     model.eval()
     total_loss = 0.0
     ious = []
@@ -379,6 +407,8 @@ def evaluate(model, loader, device, loss_fn):
 
             preds = decode_xywh(raw)
             ious.extend(iou_xywh_torch(preds.float(), yb.float()).cpu().tolist())
+            val_stats.update_raw(raw)
+            val_stats.update_loss(loss, xb.size(0))
 
     avg_loss = total_loss / len(loader.dataset)
     avg_iou = sum(ious) / len(ious) if ious else 0.0
@@ -388,6 +418,8 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=None):
     # DEBUG 001
     USE_AMP = False        # make sure this is False
     model.float()          # force params to fp32
+
+    stats = EpochStats()
 
     # inside train_one_epoch(), before the loop:
     print("[dtype] model head W:", next(model.parameters()).dtype)
@@ -429,6 +461,9 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=None):
         if DEBUG and not did_probe:
             print("[dtype] xb:", xb.dtype, "raw:", raw.dtype, "preds:", preds.dtype, "yb:", yb.dtype)
         # END DEBUG 001
+
+        stats.update_raw(raw)
+        stats.update_loss(loss, xb.size(0))
 
         # (optional) peek at decoded preds for the first batch
         if DEBUG and not did_probe:
@@ -508,7 +543,8 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=None):
         running += loss.item() * xb.size(0)
         n += xb.size(0)
 
-    return running / max(1, n)
+    raw_mean, loss_mean = stats.means()
+    return loss_mean, {"raw_min": stats.raw_min, "raw_max": stats.raw_max, "raw_mean": raw_mean}
 
 def main():
     # --- Load data (parquet paths from CONFIG) ---
@@ -614,18 +650,19 @@ def main():
     for epoch in range(TOTAL_EPOCHS):
         lr = opt.param_groups[0]["lr"]
 
-        train_loss = train_one_epoch(
+        train_loss, train_stats = train_one_epoch(
             model, train_loader, device, opt, scaler, loss_fn, max_norm=CONFIG["MAX_GRAD_NORM"]
         )
+
         val_loss, val_iou = evaluate(model, val_loader, device, loss_fn)
         plateau.step(val_loss)
 
         print(
-            f"Epoch {epoch+1:03d} "
-            f"| lr {lr:.6f} "
-            f"| train {train_loss:.4f} "
-            f"| val {val_loss:.4f} "
-            f"| val_iou {val_iou:.4f}"
+            f"Epoch {epoch:03d} | lr {lr:.6f} | "
+            f"train {train_loss:.6f} "
+            f"(raw min {train_stats['raw_min']:.2f}, max {train_stats['raw_max']:.2f}, mean {train_stats['raw_mean']:.2f}) | "
+            f"val {val_loss:.6f} "
+            f"(raw min {val_meta['raw_min']:.2f}, max {val_meta['raw_max']:.2f}, mean {val_meta['raw_mean']:.2f})"
         )
 
         # record history
