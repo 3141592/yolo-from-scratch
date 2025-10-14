@@ -25,6 +25,8 @@ from datasets import load_dataset
 from dataclasses import dataclass
 from skimage.measure import label, regionprops
 
+from utils.logger_quality import log_quality
+
 # =======================
 # Global Configuration
 # =======================
@@ -662,7 +664,6 @@ def main():
             f"train {train_loss:.6f} "
             f"(raw min {train_stats['raw_min']:.2f}, max {train_stats['raw_max']:.2f}, mean {train_stats['raw_mean']:.2f}) | "
             f"val {val_loss:.6f} "
-            f"(raw min {val_meta['raw_min']:.2f}, max {val_meta['raw_max']:.2f}, mean {val_meta['raw_mean']:.2f})"
         )
 
         # record history
@@ -671,6 +672,8 @@ def main():
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["val_iou"].append(val_iou)
+
+        log_quality(epoch, lr, train_loss, val_loss, val_iou)
 
         improved, stop = early.step(val_iou)
         if improved:

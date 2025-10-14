@@ -88,11 +88,19 @@ The goal is to understand *how YOLO works under the hood* by building each compo
 - Ensure augmentations update boxes consistently.
 
 ---
+# 10/13/2025 TODO
+A: lr=1e-2, warmup=1k steps, clip=1.0
+
+B: lr=3e-3, warmup=1k, clip=1.0
+
+C: lr=1e-3, warmup=500, clip=1.0
+
+D: lr=3e-4, warmup=0, clip=1.0
+Log QUALITY at the end of epoch 3 for each; pick best by val_iou.
+
+---
 
 ## 📂 Progress
-10/13/2025 Commit a4f9bfe
-NA
-
 10/12/2025 Commit d6e0c26
 Epoch 005 | lr 0.003000 | train nan | val 21029796.0000 | val_iou 0.0000
 
@@ -108,6 +116,5 @@ Epoch 005 | lr 0.003000 | train 0.0263 | val 0.0259 | val_iou 0.3636
 09/27/2025 Commit 8561382
 Epoch 005 | lr 0.010000 | train 0.0232 | val 0.0138 | val_iou 0.5583
 
-
-
-
+## Progress
+10/13/2025 Commit 2b2b228 Epoch 004 | lr 0.000100 | train 1.3799 | val 0.9911 | val_iou 0.2160
