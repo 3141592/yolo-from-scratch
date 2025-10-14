@@ -90,7 +90,23 @@ The goal is to understand *how YOLO works under the hood* by building each compo
 ---
 
 ## 📂 Progress
+10/13/2025 Commit a4f9bfe
+NA
 
+10/12/2025 Commit d6e0c26
+Epoch 005 | lr 0.003000 | train nan | val 21029796.0000 | val_iou 0.0000
+
+10/03/2025 Commit 250a082
+Epoch 005 | lr 0.003000 | train 288163088862348.5625 | val 30183474069504.0000 | val_iou 0.0000
+
+09/30/2025 Commit c925bf2
+NA
+
+09/29/2025 Commit c391711
+Epoch 005 | lr 0.003000 | train 0.0263 | val 0.0259 | val_iou 0.3636
+
+09/27/2025 Commit 8561382
+Epoch 005 | lr 0.010000 | train 0.0232 | val 0.0138 | val_iou 0.5583
 
 
 
