@@ -101,6 +101,15 @@ Log QUALITY at the end of epoch 3 for each; pick best by val_iou.
 ---
 
 ## 📂 Progress
+
+To generate progress update to README file:
+
+```
+python -m scripts.append_latest_quality
+git add README.md
+git commit -m "Append latest model quality to README"
+```
+
 10/12/2025 Commit d6e0c26
 Epoch 005 | lr 0.003000 | train nan | val 21029796.0000 | val_iou 0.0000
 
