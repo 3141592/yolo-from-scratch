@@ -89,5 +89,9 @@ The goal is to understand *how YOLO works under the hood* by building each compo
 
 ---
 
-## 📂 Suggested Directory Structure
+## 📂 Progress
+
+
+
+
 
