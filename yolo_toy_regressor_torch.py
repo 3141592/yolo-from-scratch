@@ -62,14 +62,16 @@ CONFIG = {
     "OVERFIT_WD": 0.0,
 
     # Training
-    "TOTAL_EPOCHS": 5,
+    "TOTAL_EPOCHS": 10,
     "MAX_GRAD_NORM": 1.0,               # gradient clipping L2 norm
+    "EPS": 1e-7, 
 
     # Optimizer
     "OPTIMIZER": "AdamW",
-    "LR": 1e-4,
-    "WEIGHT_DECAY": 1e-4,
+    "LR": 3e-3,
+    "WEIGHT_DECAY": 5e-4,
     "BETAS": (0.9, 0.999),
+    "MOMENTUM": 0.9,
 
     # Scheduler (ReduceLROnPlateau on val_loss)
     "LR_SCHEDULER": "ReduceLROnPlateau",
@@ -183,7 +185,7 @@ def _iou_of(model, x, y, device):
     iou = iou_xywh_torch(decode_xywh(p).float(), y.float())
     return torch.as_tensor(iou).mean().item()
 
-def overfit_one(model, loss_fn, x0, y0, device, steps, lr, wd):
+def overfit_one(model, loss_fn, x0, y0, device, steps, lr, mom, wd):
     """
     Overfit a single (image, box) pair. Expect IoU -> 0.9+ quickly.
     Uses a fresh optimizer & no AMP to avoid interference.
@@ -193,7 +195,7 @@ def overfit_one(model, loss_fn, x0, y0, device, steps, lr, wd):
     for p in model.parameters(): p.requires_grad = False
     last = [m for m in model.modules() if isinstance(m, nn.Linear) and m.out_features == 4][0]
     for p in last.parameters(): p.requires_grad = True
-    opt = torch.optim.AdamW(last.parameters(), lr=lr, weight_decay=wd, betas=(0.9, 0.99))
+    opt = optim.SGD(last.parameters(), lr=lr, momentum=mom, weight_decay=wd)
 
     x0 = x0.to(device)
     y0 = y0.to(device)
@@ -223,27 +225,57 @@ def overfit_one(model, loss_fn, x0, y0, device, steps, lr, wd):
 
 @torch.no_grad()
 def iou_xywh_torch(pred, gt):
+    """
+    Compute IoU between predicted and ground-truth boxes in [x_center, y_center, w, h] format.
+
+    Args:
+        pred: (N, 4) tensor of predicted boxes, values in [0,1].
+        gt:   (N, 4) tensor of ground-truth boxes, values in [0,1].
+        eps:  small constant to avoid division by zero / NaNs.
+    Returns:
+        IoU tensor of shape (N,)
+    """
+    eps = 1e-7
+    # Clamp widths/heights to strictly positive values
+    pred = pred.clone()
+    gt   = gt.clone()
+    pred[:, 2:] = torch.clamp(pred[:, 2:], min=eps)
+    gt[:, 2:]   = torch.clamp(gt[:, 2:],   min=eps)
+
+    # Convert from [xc, yc, w, h] → [x1, y1, x2, y2]
     p = torch.stack([
-        pred[:,0] - 0.5*pred[:,2],
-        pred[:,1] - 0.5*pred[:,3],
-        pred[:,0] + 0.5*pred[:,2],
-        pred[:,1] + 0.5*pred[:,3],
+        pred[:, 0] - 0.5 * pred[:, 2],
+        pred[:, 1] - 0.5 * pred[:, 3],
+        pred[:, 0] + 0.5 * pred[:, 2],
+        pred[:, 1] + 0.5 * pred[:, 3],
     ], dim=1)
+
     g = torch.stack([
-        gt[:,0] - 0.5*gt[:,2],
-        gt[:,1] - 0.5*gt[:,3],
-        gt[:,0] + 0.5*gt[:,2],
-        gt[:,1] + 0.5*gt[:,3],
+        gt[:, 0] - 0.5 * gt[:, 2],
+        gt[:, 1] - 0.5 * gt[:, 3],
+        gt[:, 0] + 0.5 * gt[:, 2],
+        gt[:, 1] + 0.5 * gt[:, 3],
     ], dim=1)
+
+    # Clamp coordinates to [0,1] range to prevent negatives or overflow
+    p = torch.clamp(p, 0.0, 1.0)
+    g = torch.clamp(g, 0.0, 1.0)
+
+    # Intersection
     inter_mins = torch.maximum(p[:, :2], g[:, :2])
     inter_maxs = torch.minimum(p[:, 2:], g[:, 2:])
     inter_wh   = torch.clamp(inter_maxs - inter_mins, min=0.0)
-    inter_area = inter_wh[:,0] * inter_wh[:,1]
-    area_p = (p[:,2]-p[:,0]) * (p[:,3]-p[:,1])
-    area_g = (g[:,2]-g[:,0]) * (g[:,3]-g[:,1])
+    inter_area = inter_wh[:, 0] * inter_wh[:, 1]
+
+    # Areas (clamped to avoid negative or zero)
+    area_p = torch.clamp((p[:, 2] - p[:, 0]), min=0.0) * torch.clamp((p[:, 3] - p[:, 1]), min=0.0)
+    area_g = torch.clamp((g[:, 2] - g[:, 0]), min=0.0) * torch.clamp((g[:, 3] - g[:, 1]), min=0.0)
+
+    # IoU computation with eps to avoid div-by-zero
     union_area = area_p + area_g - inter_area
-    iou = (inter_area / union_area).clamp(0.0, 1.0)
-    return iou.reshape(-1)   # ensure it's always a 1D tensor
+    iou = inter_area / (union_area + eps)
+
+    return iou.clamp(0.0, 1.0).reshape(-1)
 
 def get_samples_from_dataset(dataset):
     """Returns X (N, H, W, 3 in [0,1]) and Y (N,4 normalized)."""
@@ -383,7 +415,7 @@ def decode_xywh(raw):
     w = torch.sigmoid(zw)
     h = torch.sigmoid(zh)
     # clamp away from exact 0/1 to avoid 0-area and weird IoU divisions
-    eps = 1e-6
+    eps = 1e-7
     w = torch.clamp(w, eps, 1.0 - eps)
     h = torch.clamp(h, eps, 1.0 - eps)
     return torch.stack([x, y, w, h], dim=-1)
@@ -405,6 +437,10 @@ def evaluate(model, loader, device, loss_fn):
             xb, yb = xb.to(device), yb.to(device)
             raw = model(xb)
             loss = loss_fn(raw, yb)
+            if not torch.isfinite(loss):
+              print("[warn] non-finite loss; skipping step")
+              opt.zero_grad(set_to_none=True)
+              continue
             total_loss += loss.item() * xb.size(0)
 
             preds = decode_xywh(raw)
@@ -420,6 +456,7 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=None):
     # DEBUG 001
     USE_AMP = False        # make sure this is False
     model.float()          # force params to fp32
+    eps = 1e-7
 
     stats = EpochStats()
 
@@ -455,9 +492,16 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=None):
 
         # forward + loss under autocast
         with torch.amp.autocast(device_type="cuda", enabled=USE_AMP):
-            raw   = model(xb)
+            raw = model(xb)
             preds = decode_xywh(raw)
-            loss  = loss_fn(raw, yb)
+            preds = preds.clamp(eps, 1.0 - eps)
+            xc, yc, w, h = preds[...,0], preds[...,1], preds[...,2], preds[...,3]
+
+            loss = loss_fn(raw, yb)
+            if not torch.isfinite(loss):
+              print("[warn] non-finite loss; skipping step")
+              opt.zero_grad(set_to_none=True)
+              continue
 
         # DEBUG 001
         if DEBUG and not did_probe:
@@ -471,6 +515,9 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=None):
         if DEBUG and not did_probe:
             with torch.no_grad():
                 preds = decode_xywh(raw)
+                preds = preds.clamp(eps, 1.0 - eps)
+                xc, yc, w, h = preds[...,0], preds[...,1], preds[...,2], preds[...,3]
+
                 print(f"[dbg] preds [xc,yc,w,h] batch head: {preds[:2]}")
 
         # snapshot params before backward (first batch only)
@@ -525,7 +572,9 @@ def train_one_epoch(model, loader, device, opt, scaler, loss_fn, max_norm=None):
             loss.backward()
             if max_norm is not None:
                 nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             opt.step()
+            opt.zero_grad(set_to_none=True)
 
         # first-batch grad norms (unscaled)
         if DEBUG and not did_probe:
@@ -594,6 +643,7 @@ def main():
             x0, y0, device,
             steps=CONFIG["OVERFIT_STEPS"],
             lr=CONFIG["OVERFIT_LR"],
+            mom=CONFIG["MOMENTUM"],
             wd=CONFIG["OVERFIT_WD"],
         )
         return
@@ -628,11 +678,24 @@ def main():
 
     loss_fn = yolo_single_box_loss
 
-    opt = optim.AdamW(
-        model.parameters(),
+    # build param groups: decay everything *except* 1D params (BN/LayerNorm/scale) and biases
+    decay, no_decay = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.dim() == 1 or n.endswith(".bias"):
+            no_decay.append(p)
+        else:
+            decay.append(p)
+
+    opt = optim.SGD(
+        [
+            {"params": decay, "weight_decay": CONFIG["WEIGHT_DECAY"]},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
         lr=CONFIG["LR"],
-        weight_decay=CONFIG["WEIGHT_DECAY"],
-        betas=CONFIG["BETAS"],
+        momentum=CONFIG["MOMENTUM"],
+        nesterov=True,
     )
 
     plateau = optim.lr_scheduler.ReduceLROnPlateau(
