@@ -58,7 +58,7 @@ CONFIG = {
     "OVERFIT_WD": 0.0,
 
     # Training
-    "TOTAL_EPOCHS": 20,
+    "TOTAL_EPOCHS": 5,
     "WARMUP": 5,
     "MAX_GRAD_NORM": 1.0,               # gradient clipping L2 norm
     "EPS": 1e-7,
