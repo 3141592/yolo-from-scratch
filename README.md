@@ -128,3 +128,4 @@ Epoch 005 | lr 0.010000 | train 0.0232 | val 0.0138 | val_iou 0.5583
 ## Progress
 10/13/2025 Commit 2b2b228 Epoch 004 | lr 0.000100 | train 1.3799 | val 0.9911 | val_iou 0.2160
 10/14/2025 Commit 71e6690 Epoch 004 | lr 0.003000 | train 2.5890 | val 2.4107 | val_iou 0.1234
+10/16/2025 Commit e6cd027 Epoch 004 | lr 0.010000 | train 0.0225 | val 0.0135 | val_iou 0.5587
