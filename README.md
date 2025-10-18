@@ -101,7 +101,7 @@ boxes.
 - During training we optimize the following, multi-part loss function:
 ![YOLO Loss Function](assets/yolo_loss_function.png)
 
--- Where:
+- Where:
 -- \(S\): number of grid cells per image side  
 -- \(B\): number of bounding boxes per grid cell  
 -- \( \lambda_{\text{coord}}, \lambda_{\text{noobj}} \): weighting terms  
