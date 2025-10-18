@@ -99,7 +99,8 @@ The goal is to understand *how YOLO works under the hood* by building each compo
 boxes. 
 -- To partially address this we predict the square root of the bounding box width and height instead of the width and height directly.
 - During training we optimize the following, multi-part loss function:
--- ![YOLO Loss Function](assets/yolo_loss_function.png)
+![YOLO Loss Function](assets/yolo_loss_function.png)
+
 -- Where:
 -- \(S\): number of grid cells per image side  
 -- \(B\): number of bounding boxes per grid cell  
