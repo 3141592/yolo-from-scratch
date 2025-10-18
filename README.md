@@ -90,24 +90,28 @@ The goal is to understand *how YOLO works under the hood* by building each compo
 ## Details from You Only Look Once: Unified, Real-Time Object Detection
 - We normalize the bounding box width and height by the image width and height so that they fall between 0 and 1.
 - We parametrize the bounding box x and y coordinates to be offsets of a particular grid cell location so they are also bounded between 0 and 1.
-- We use a linear activation function for the final layer and all other layers use the following leaky rectified linear activation
+- We use a linear activation function for the final layer and all other layers use the following leaky rectified linear activation.
 - We optimize for sum-squared error in the output of our model.
 - We increase the loss from bounding box coordinate predictions and decrease the loss from confi-dence predictions for boxes that don’t contain objects. 
--- We use two parameters, λcoord and λnoobj to accomplish this. 
--- We set λcoord = 5 and λnoobj = .5.
+  - We use two parameters, λcoord and λnoobj to accomplish this. 
+  - We set λcoord = 5 and λnoobj = .5.
 - Sum-squared error also equally weights errors in large boxes and small boxes. Our error metric should reflect that small deviations in large boxes matter less than in small
 boxes. 
--- To partially address this we predict the square root of the bounding box width and height instead of the width and height directly.
+  - To partially address this we predict the square root of the bounding box width and height instead of the width and height directly.
 - During training we optimize the following, multi-part loss function:
 ![YOLO Loss Function](assets/yolo_loss_function.png)
 
--- Where: 
-
--- \(S\): number of grid cells per image side  
--- \(B\): number of bounding boxes per grid cell  
--- \( \lambda_{\text{coord}}, \lambda_{\text{noobj}} \): weighting terms  
--- \(C_i\): confidence score  
--- \(p_i(c)\): predicted class probability  
+- Where: 
+  - \(S\): number of grid cells per image side  
+  - \(B\): number of bounding boxes per grid cell  
+  - \( \lambda_{\text{coord}}, \lambda_{\text{noobj}} \): weighting terms  
+  - \(C_i\): confidence score  
+  - \(p_i(c)\): predicted class probability  
+- We train the network for about 135 epochs.
+- Throughout training we use a batch size of 64, a momentum of 0.9 and a decay of 0.0005.
+- Our learning rate schedule is as follows: 
+  - For the first epochs we slowly raise the learning rate from 10-3 to 10−2.
+  - We continue training with 10−2 for 75 epochs, then 10−3 for 30 epochs, and finally 10−4 for 30 epochs.
 
 
 ---
