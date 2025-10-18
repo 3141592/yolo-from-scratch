@@ -102,11 +102,12 @@ boxes.
 ![YOLO Loss Function](assets/yolo_loss_function.png)
 
 - Where: 
-- <i>S</i>: number of grid cells per image side  
-- <i>B</i>: number of bounding boxes per grid cell  
-- λ<sub>coord</sub>, λ<sub>noobj</sub>: weighting terms  
-- C<sub>i</sub>: confidence score  
-- p<sub>i</sub>(c): predicted class probability  
+  - <i>S</i>: number of grid cells per image side  
+  - <i>B</i>: number of bounding boxes per grid cell  
+  - λ<sub>coord</sub>, λ<sub>noobj</sub>: weighting terms  
+  - C<sub>i</sub>: confidence score  
+  - p<sub>i</sub>(c): predicted class probability  
+
 - We train the network for about 135 epochs.
 - Throughout training we use a batch size of 64, a momentum of 0.9 and a decay of 0.0005.
 - Our learning rate schedule is as follows: 
