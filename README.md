@@ -93,8 +93,8 @@ The goal is to understand *how YOLO works under the hood* by building each compo
 - We use a linear activation function for the final layer and all other layers use the following leaky rectified linear activation.
 - We optimize for sum-squared error in the output of our model.
 - We increase the loss from bounding box coordinate predictions and decrease the loss from confi-dence predictions for boxes that don’t contain objects. 
-  - We use two parameters, λcoord and λnoobj to accomplish this. 
-  - We set λcoord = 5 and λnoobj = .5.
+  - We use two parameters, λ<sub>coord</sub> and λ<sub>noobj</sub> to accomplish this. 
+  - We set λ<sub>coord</sub> = 5 and λ<sub>noobj</sub> = .5.
 - Sum-squared error also equally weights errors in large boxes and small boxes. Our error metric should reflect that small deviations in large boxes matter less than in small
 boxes. 
   - To partially address this we predict the square root of the bounding box width and height instead of the width and height directly.
@@ -110,8 +110,8 @@ boxes.
 - We train the network for about 135 epochs.
 - Throughout training we use a batch size of 64, a momentum of 0.9 and a decay of 0.0005.
 - Our learning rate schedule is as follows: 
-  - For the first epochs we slowly raise the learning rate from 10-3 to 10−2.
-  - We continue training with 10−2 for 75 epochs, then 10−3 for 30 epochs, and finally 10−4 for 30 epochs.
+  - For the first epochs we slowly raise the learning rate from 10<sup>-3</sup> to 10<sup>−2</sup>.
+  - We continue training with 10<sup>−2</sup> for 75 epochs, then 10<sup>−3</sup> for 30 epochs, and finally 10<sup>−4</sup> for 30 epochs.
 
 
 ---
