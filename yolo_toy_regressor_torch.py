@@ -370,7 +370,7 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = YOLOToyRegressor().to(device)
-    loss_fn = nn.SmoothL1Loss(reduction="mean")
+    loss_fn = nn.MSELoss()
     opt = optim.SGD(model.parameters(), 
                     lr=CONFIG["LR"], 
                     momentum=CONFIG["MOMENTUM"], 
@@ -416,6 +416,8 @@ def main():
             best_val_iou = val_iou
             torch.save(model.state_dict(), best_path)
             print(f"  ↳ Saved new best (val_iou={val_iou:.4f}) to {best_path}")
+            log_quality(epoch, lr, train_loss, val_loss, val_iou, best=True)
+
         if stop:
             print("Early stopping triggered.")
             break

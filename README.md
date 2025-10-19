@@ -90,9 +90,9 @@ The goal is to understand *how YOLO works under the hood* by building each compo
 ## Details from You Only Look Once: Unified, Real-Time Object Detection
 - We normalize the bounding box width and height by the image width and height so that they fall between 0 and 1.
 - We parametrize the bounding box x and y coordinates to be offsets of a particular grid cell location so they are also bounded between 0 and 1.
-- We use a linear activation function for the final layer and all other layers use the following leaky rectified linear activation.
-- We optimize for sum-squared error in the output of our model.
-- We increase the loss from bounding box coordinate predictions and decrease the loss from confi-dence predictions for boxes that don’t contain objects. 
+- DONE We use a linear activation function for the final layer and all other layers use the following leaky rectified linear activation.
+- DONE We optimize for sum-squared error in the output of our model.
+- We increase the loss from bounding box coordinate predictions and decrease the loss from confidence predictions for boxes that don’t contain objects. 
   - We use two parameters, λ<sub>coord</sub> and λ<sub>noobj</sub> to accomplish this. 
   - We set λ<sub>coord</sub> = 5 and λ<sub>noobj</sub> = .5.
 - Sum-squared error also equally weights errors in large boxes and small boxes. Our error metric should reflect that small deviations in large boxes matter less than in small
@@ -161,3 +161,4 @@ Epoch 005 | lr 0.010000 | train 0.0232 | val 0.0138 | val_iou 0.5583
 10/14/2025 Commit 71e6690 Epoch 004 | lr 0.003000 | train 2.5890 | val 2.4107 | val_iou 0.1234
 10/16/2025 Commit e6cd027 Epoch 004 | lr 0.010000 | train 0.0225 | val 0.0135 | val_iou 0.5587
 10/16/2025 Commit c49958b Epoch 004 | lr 0.010000 | train 0.0261 | val 0.0141 | val_iou 0.5523
+10/18/2025 10/18/2025 Commit f06afb5 Epoch 010 | lr 0.010000 | train 0.0476 | val 0.0254 | val_iou 0.6093

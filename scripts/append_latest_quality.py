@@ -1,68 +1,120 @@
-#!/usr/bin/env python3
 """
-After training (when log_quality() has run):
+Append latest or best model quality stats to README.md
 
-python -m scripts.append_latest_quality
-git add README.md
-git commit -m "Append latest model quality to README"
+Priority order:
+1. Prefer logs/<sha>/best.json sidecar (if present and valid)
+2. Else fall back to scanning the rolling log for the best val_iou
+3. If nothing found, exit gracefully
 
+Keeps your README updated with lines like:
+  10/18/2025 Commit f06afb5 Epoch 011 | lr 0.010000 | train 0.0487 | val 0.0253 | val_iou 0.6122
 """
 
-import json, sys, re
-from pathlib import Path
+import json
+import re
+import subprocess
+import sys
 from datetime import datetime
-from utils.logger_quality import LOG_PATH   # 🔹 imported from your logger module
+from pathlib import Path
 
+# -------- CONFIG --------
 README = "README.md"
+LOG_PATH = "/var/log/yolo_train.log"
+SIDE_DIR = Path("logs")  # matches logger_quality default
+# -------------------------
 
-def last_quality(path):
-    """Return the most recent QUALITY record from the log."""
+def git_short():
+    """Return short git SHA or 'NA'."""
     try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in reversed(f.readlines()):
-                i = line.find("{")
-                if i >= 0:
-                    try:
-                        obj = json.loads(line[i:].strip())
-                    except Exception:
-                        continue
-                    if obj.get("tag") == "QUALITY":
-                        return obj
-    except FileNotFoundError:
-        pass
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"], text=True
+        ).strip()
+    except Exception:
+        return "NA"
+
+def ensure_progress_header(txt: str) -> str:
+    if "## Progress" not in txt:
+        txt += "\n## Progress\n\n"
+    return txt
+
+def load_sidecar(sha: str):
+    """Return dict from logs/<sha>/best.json or None."""
+    path = SIDE_DIR / sha / "best.json"
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
     return None
 
-def ensure_progress_header(text):
-    """Add a Progress section if missing."""
-    if re.search(r"(?im)^\s*##\s*Progress\s*$", text):
-        return text
-    return text.rstrip() + "\n\n## Progress\n\n"
+def all_quality_rows(log_path):
+    """Return list of QUALITY/QUALITY_BEST dicts from log."""
+    rows = []
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if "{" not in line:
+                    continue
+                try:
+                    obj = json.loads(line[line.find("{"):])
+                except Exception:
+                    continue
+                if obj.get("tag", "").startswith("QUALITY"):
+                    rows.append(obj)
+    except FileNotFoundError:
+        pass
+    return rows
+
+def pick_best(rows):
+    """Pick best record by val_iou, break ties by lower val loss and higher epoch."""
+    if not rows:
+        return None
+    return max(rows, key=lambda r: (
+        float(r.get("val_iou", -1)),
+        -float(r.get("val", float("inf"))),
+        int(r.get("epoch", -1)),
+    ))
+
+def upsert_readme_line(readme_text: str, commit: str, new_line: str) -> str:
+    """Replace existing commit line or append if not present."""
+    pattern = re.compile(rf"Commit {re.escape(commit)} .*")
+    if pattern.search(readme_text):
+        return pattern.sub(new_line, readme_text)
+    else:
+        return readme_text.rstrip() + "\n" + new_line + "\n"
 
 def main():
-    rec = last_quality(LOG_PATH)
-    if not rec:
-        print(f"No QUALITY record found in {LOG_PATH}")
+    sha = git_short()
+    best = load_sidecar(sha)
+
+    # Fallback: scan rolling log
+    if best is None:
+        rows = all_quality_rows(LOG_PATH)
+        best = pick_best([r for r in rows if r.get("commit") == sha] or rows)
+
+    if not best:
+        print("No QUALITY or sidecar record found.")
         sys.exit(0)
+
+    dt = datetime.strptime(best["date"], "%Y-%m-%d").strftime("%m/%d/%Y")
+    line = (
+        f"{dt} Commit {best.get('commit','NA')} "
+        f"Epoch {int(best['epoch']):03d} | "
+        f"lr {float(best['lr']):.6f} | "
+        f"train {float(best['train']):.4f} | "
+        f"val {float(best['val']):.4f} | "
+        f"val_iou {float(best['val_iou']):.4f}"
+    )
 
     readme = Path(README)
     if not readme.exists():
         readme.write_text("# README\n\n## Progress\n\n", encoding="utf-8")
     txt = readme.read_text(encoding="utf-8")
 
-    # Skip if already logged for this commit
-    if rec.get("commit", "NA") in txt:
-        print("README already has this commit; nothing to do.")
-        return
-
-    txt = ensure_progress_header(txt)
-    dt = datetime.strptime(rec["date"], "%Y-%m-%d").strftime("%m/%d/%Y")
-    line = (f"{dt} Commit {rec.get('commit','NA')} "
-            f"Epoch {int(rec['epoch']):03d} | lr {rec['lr']:.6f} | "
-            f"train {rec['train']:.4f} | val {rec['val']:.4f} | "
-            f"val_iou {rec['val_iou']:.4f}")
-
-    readme.write_text(txt.rstrip() + "\n" + line + "\n", encoding="utf-8")
-    print(f"Appended: {line}")
+    new_txt = upsert_readme_line(ensure_progress_header(txt), sha, line)
+    readme.write_text(new_txt, encoding="utf-8")
+    print(f"Appended or updated: {line}")
 
 if __name__ == "__main__":
     main()
