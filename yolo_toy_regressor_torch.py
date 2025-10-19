@@ -265,7 +265,7 @@ class YOLOToyRegressor(nn.Module):
         return x
 
 # ---------- Training / Eval ----------
-def yolo_v1_lr_schedule(epoch, total_epochs=30, warmup=CONFIG["WARMUP"]):
+def yolo_v1_lr_schedule(epoch, total_epochs=CONFIG["TOTAL_EPOCHS"], warmup=CONFIG["WARMUP"]):
     if epoch < warmup:
         return 1e-3 + (1e-2 - 1e-3) * (epoch + 1) / max(1, warmup)
     elif epoch < warmup + 75:
@@ -390,9 +390,9 @@ def main():
     # ---- Simple history recorder ----
     history = {"epoch": [], "lr": [], "train_loss": [], "val_loss": [], "val_iou": []}
 
-    for epoch in range(TOTAL_EPOCHS):
+    for epoch_num in range(1, TOTAL_EPOCHS + 1):
         # epoch-wise LR schedule
-        lr = yolo_v1_lr_schedule(epoch, total_epochs=TOTAL_EPOCHS, warmup=CONFIG["WARMUP"])
+        lr = yolo_v1_lr_schedule(epoch_num - 1, total_epochs=TOTAL_EPOCHS, warmup=CONFIG["WARMUP"])
         for pg in opt.param_groups:
             pg["lr"] = lr
 
@@ -400,23 +400,23 @@ def main():
         val_loss, val_iou = evaluate(model, val_loader, device, loss_fn)
         plateau.step(val_loss)
 
-        print(f"Epoch {epoch+1:03d} | lr {lr:.6f} | train {train_loss:.4f} | val {val_loss:.4f} | val_iou {val_iou:.4f}")
+        print(f"Epoch {epoch_num:03d} | lr {lr:.6f} | train {train_loss:.4f} | val {val_loss:.4f} | val_iou {val_iou:.4f}")
 
         # record history
-        history["epoch"].append(epoch + 1)
+        history["epoch"].append(epoch_num)
         history["lr"].append(lr)
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["val_iou"].append(val_iou)
 
-        log_quality(epoch, lr, train_loss, val_loss, val_iou)
+        log_quality(epoch_num, lr, train_loss, val_loss, val_iou)
 
         improved, stop = early.step(val_iou)
         if improved:
             best_val_iou = val_iou
             torch.save(model.state_dict(), best_path)
             print(f"  ↳ Saved new best (val_iou={val_iou:.4f}) to {best_path}")
-            log_quality(epoch, lr, train_loss, val_loss, val_iou, best=True)
+            log_quality(epoch_num, lr, train_loss, val_loss, val_iou, best=True)
 
         if stop:
             print("Early stopping triggered.")
