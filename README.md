@@ -113,7 +113,10 @@ boxes.
 - Our learning rate schedule is as follows: 
   - For the first epochs we slowly raise the learning rate from 10<sup>-3</sup> to 10<sup>−2</sup>.
   - We continue training with 10<sup>−2</sup> for 75 epochs, then 10<sup>−3</sup> for 30 epochs, and finally 10<sup>−4</sup> for 30 epochs.
-
+- To avoid overfitting we use dropout and extensive data augmentation. 
+- - A dropout layer with rate = .5 after the first connected layer prevents co-adaptation between layers.
+- - For data augmentation we introduce random scaling and translations of up to 20% of the original image size. 
+- - We also randomly adjust the exposure and saturation of the image by up to a factor of 1.5 in the HSV color space.
 
 ---
 # 10/13/2025 TODO
