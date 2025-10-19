@@ -89,15 +89,21 @@ The goal is to understand *how YOLO works under the hood* by building each compo
 
 ## Details from You Only Look Once: Unified, Real-Time Object Detection
 - We normalize the bounding box width and height by the image width and height so that they fall between 0 and 1.
+
 - We parametrize the bounding box x and y coordinates to be offsets of a particular grid cell location so they are also bounded between 0 and 1.
+
 - DONE We use a linear activation function for the final layer and all other layers use the following leaky rectified linear activation.
+
 - DONE We optimize for sum-squared error in the output of our model.
+
 - We increase the loss from bounding box coordinate predictions and decrease the loss from confidence predictions for boxes that don’t contain objects. 
   - We use two parameters, λ<sub>coord</sub> and λ<sub>noobj</sub> to accomplish this. 
   - We set λ<sub>coord</sub> = 5 and λ<sub>noobj</sub> = .5.
+
 - Sum-squared error also equally weights errors in large boxes and small boxes. Our error metric should reflect that small deviations in large boxes matter less than in small
 boxes. 
   - To partially address this we predict the square root of the bounding box width and height instead of the width and height directly.
+
 - During training we optimize the following, multi-part loss function:
 ![YOLO Loss Function](assets/yolo_loss_function.png)
 
@@ -109,12 +115,15 @@ boxes.
   - p<sub>i</sub>(c): predicted class probability  
 
 - We train the network for about 135 epochs.
-- Throughout training we use a batch size of 64, a momentum of 0.9 and a decay of 0.0005.
-- Our learning rate schedule is as follows: 
+
+- DONE Throughout training we use a batch size of 64, a momentum of 0.9 and a decay of 0.0005.
+
+- DONE Our learning rate schedule is as follows: 
   - For the first epochs we slowly raise the learning rate from 10<sup>-3</sup> to 10<sup>−2</sup>.
   - We continue training with 10<sup>−2</sup> for 75 epochs, then 10<sup>−3</sup> for 30 epochs, and finally 10<sup>−4</sup> for 30 epochs.
+
 - To avoid overfitting we use dropout and extensive data augmentation. 
-- - A dropout layer with rate = .5 after the first connected layer prevents co-adaptation between layers.
+- - DONE A dropout layer with rate = .5 after the first connected layer prevents co-adaptation between layers.
 - - For data augmentation we introduce random scaling and translations of up to 20% of the original image size. 
 - - We also randomly adjust the exposure and saturation of the image by up to a factor of 1.5 in the HSV color space.
 
@@ -163,3 +172,4 @@ Epoch 005 | lr 0.010000 | train 0.0232 | val 0.0138 | val_iou 0.5583
 10/16/2025 Commit c49958b Epoch 004 | lr 0.010000 | train 0.0261 | val 0.0141 | val_iou 0.5523
 10/18/2025 10/18/2025 Commit f06afb5 Epoch 010 | lr 0.010000 | train 0.0476 | val 0.0254 | val_iou 0.6093
 10/18/2025 Commit a9e7477 Epoch 012 | lr 0.010000 | train 0.0564 | val 0.0255 | val_iou 0.6033
+10/18/2025 Commit 96cf66a Epoch 034 | lr 0.010000 | train 0.0502 | val 0.0254 | val_iou 0.5984

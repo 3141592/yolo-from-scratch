@@ -36,13 +36,13 @@ CONFIG = {
 
     # Data & Preprocessing
     "IMAGE_SIZE": 448,                  # Resize to (IMAGE_SIZE, IMAGE_SIZE)
-    "MAX_SAMPLES": 128,                 # Max samples to draw from parquet
+    "MAX_SAMPLES": 512,                 # Max samples to draw from parquet
     "TRAIN_SPLIT": 0.8,                 # Train/validation split fraction
     "TRAIN_PATH": "/home/roy/src/data/voc2012/train-00000-of-00001.parquet",
     "VAL_PATH":   "/home/roy/src/data/voc2012/val-00000-of-00001.parquet",
 
     # Dataloader
-    "BATCH_SIZE": 4,
+    "BATCH_SIZE": 64,
     "NUM_WORKERS": 2,
     "PIN_MEMORY": True,
 
@@ -58,7 +58,7 @@ CONFIG = {
     "OVERFIT_WD": 0.0,
 
     # Training
-    "TOTAL_EPOCHS": 20,
+    "TOTAL_EPOCHS": 135,
     "WARMUP": 5,
     "MAX_GRAD_NORM": 1.0,               # gradient clipping L2 norm
     "EPS": 1e-7,
