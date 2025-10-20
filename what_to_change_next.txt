@@ -1,0 +1,25 @@
+10/18/2025
+
+What to change (quick wins first)
+
+Smaller batch size: try 16 (or 8). That’s 32–64 steps/epoch instead of 8, giving the optimizer ~4–8× more updates.
+
+More updates: if you can’t add data, do heavier/varied augmentations (flips, small translations, scale jitter) so the model sees more diversity.
+
+LR schedule & patience: with more steps/epoch you can keep lr=1e-2 but add a short warmup (e.g., 200–500 steps) and use cosine decay or ReduceLROnPlateau with a larger patience in batches terms (or just increase patience in epochs after increasing steps/epoch).
+
+Check output clamping: compute the loss on unclamped linear outputs (apply sigmoid/clamp only for IoU/metrics). Clamping before the loss can zero gradients and encourage collapse.
+
+Regularization: on tiny data, reduce/dropout (or remove it), and lower weight decay. Too much reg pushes toward the mean solution.
+
+BatchNorm sanity: with small batches/steps, BN can be noisy/frozen. Options:
+
+Switch BN to Eval for inference only but keep Training during fit (normal).
+
+If batches get very small (≤8), consider GroupNorm/LayerNorm or SyncBN (if multi-GPU).
+
+Overfit harness: confirm capacity/grad flow by overfitting 1–8 images (batch=1, high lr if needed) until loss→~0 and IoU→~1. If it can’t, debugging is in the model/loss path.
+
+Loss weights: ensure your λ_coord=5, λ_noobj=0.5 are actually applied, and that IoU is computed on decoded boxes (after sigmoid + scale to cell/image as you intend).
+
+Optimizer details: don’t weight-decay BN/bias; consider AdamW with β2=0.99–0.999; try a slightly higher initial LR (e.g., 2e-2) after you increase steps/epoch.

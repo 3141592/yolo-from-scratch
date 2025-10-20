@@ -36,13 +36,13 @@ CONFIG = {
 
     # Data & Preprocessing
     "IMAGE_SIZE": 448,                  # Resize to (IMAGE_SIZE, IMAGE_SIZE)
-    "MAX_SAMPLES": 512,                 # Max samples to draw from parquet
+    "MAX_SAMPLES": 1400,                 # Max samples to draw from parquet
     "TRAIN_SPLIT": 0.8,                 # Train/validation split fraction
     "TRAIN_PATH": "/home/roy/src/data/voc2012/train-00000-of-00001.parquet",
     "VAL_PATH":   "/home/roy/src/data/voc2012/val-00000-of-00001.parquet",
 
     # Dataloader
-    "BATCH_SIZE": 64,
+    "BATCH_SIZE": 8,
     "NUM_WORKERS": 2,
     "PIN_MEMORY": True,
 
@@ -59,13 +59,13 @@ CONFIG = {
 
     # Training
     "TOTAL_EPOCHS": 135,
-    "WARMUP": 5,
+    "WARMUP": 300,
     "MAX_GRAD_NORM": 1.0,               # gradient clipping L2 norm
     "EPS": 1e-7,
 
     # Optimizer
     "OPTIMIZER": "AdamW",
-    "LR": 3e-3,
+    "LR": 0.01,
     "WEIGHT_DECAY": 5e-4,
     "BETAS": (0.9, 0.999),
     "MOMENTUM": 0.9,
@@ -78,7 +78,7 @@ CONFIG = {
     "LR_MIN": 1e-6,
 
     # Early Stopping (maximize val_iou)
-    "EARLY_PATIENCE": 12,
+    "EARLY_PATIENCE": 15,
     "EARLY_MIN_DELTA": 0.0,
 
     # Checkpoint
