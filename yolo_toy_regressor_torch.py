@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
+import torch.nn.functional as F
 
 from datasets import load_dataset
 from skimage.measure import label, regionprops
@@ -497,6 +498,44 @@ def main():
 
     sample_list = [train[i] for i in range(16)]
     X, Y = get_samples_from_dataset(sample_list)
+
+    # 1) IoU of a box with itself must be ~1.0
+    with torch.no_grad():
+        y_t = torch.tensor(Y[:4], dtype=torch.float32)  # first few ground-truth boxes
+        iou_self = bbox_iou_xywh(y_t, y_t).mean().item()
+        print("[sanity] IoU(Y, Y) =", iou_self)  # expect ~1.0
+
+    # 2) Small jitter should still give a positive IoU
+    delta = torch.tensor([[0.02, -0.01, 0.0, 0.0]]).repeat(y_t.size(0), 1)  # small center shift
+    iou_jitter = bbox_iou_xywh(y_t + delta, y_t).mean().item()
+    print("[sanity] IoU(Y+tiny_shift, Y) =", iou_jitter)  # expect ~0.7–0.95 depending on sizes
+
+    # 3) Check metric geometry after transforms
+    px, py, pw, ph = y_t.unbind(1)
+    pw_t = F.softplus(pw) + 1e-6
+    ph_t = F.softplus(ph) + 1e-6
+    print("[sanity] post-transform w/h min/max:",
+          pw_t.min().item(), pw_t.max().item(),
+          ph_t.min().item(), ph_t.max().item())
+
+    # Sanity check: confirm target boxes are normalized to [0,1]
+    print("\n[Sanity check] Target value ranges (expected ~0-1)")
+    print("shape:", Y.shape)
+
+    x_min, x_max = Y[:, 0].min().item(), Y[:, 0].max().item()
+    y_min, y_max = Y[:, 1].min().item(), Y[:, 1].max().item()
+    w_min, w_max = Y[:, 2].min().item(), Y[:, 2].max().item()
+    h_min, h_max = Y[:, 3].min().item(), Y[:, 3].max().item()
+
+    print(f"x range: {x_min:.3f} – {x_max:.3f}")
+    print(f"y range: {y_min:.3f} – {y_max:.3f}")
+    print(f"w range: {w_min:.3f} – {w_max:.3f}")
+    print(f"h range: {h_min:.3f} – {h_max:.3f}")
+
+    # Quick sample print
+    print("\nFirst 3 target boxes:")
+    print(Y[:3])
+
     idx = int(CONFIG["TRAIN_SPLIT"]*len(X))
     X_tr, Y_tr = X[:idx], Y[:idx]
     X_va, Y_va = X[idx:], Y[idx:]
