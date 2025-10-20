@@ -42,7 +42,7 @@ CONFIG = {
     "VAL_PATH":   "/home/roy/src/data/voc2012/val-00000-of-00001.parquet",
 
     # Dataloader
-    "BATCH_SIZE": 8,
+    "BATCH_SIZE": 4,
     "NUM_WORKERS": 2,
     "PIN_MEMORY": True,
 
@@ -59,13 +59,13 @@ CONFIG = {
 
     # Training
     "TOTAL_EPOCHS": 135,
-    "WARMUP": 300,
+    "WARMUP": 5,
     "MAX_GRAD_NORM": 1.0,               # gradient clipping L2 norm
     "EPS": 1e-7,
 
     # Optimizer
     "OPTIMIZER": "AdamW",
-    "LR": 0.01,
+    "LR": 1e-3,
     "WEIGHT_DECAY": 5e-4,
     "BETAS": (0.9, 0.999),
     "MOMENTUM": 0.9,
