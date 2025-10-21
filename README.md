@@ -176,3 +176,4 @@ Epoch 005 | lr 0.010000 | train 0.0232 | val 0.0138 | val_iou 0.5583
 10/19/2025 Commit b98748a Epoch 057 | lr 0.002710 | train 0.0416 | val 0.0308 | val_iou 0.5129
 10/19/2025 Commit 1aa992a Epoch 012 | lr 0.010000 | train 0.0535 | val 0.0257 | val_iou 0.6041
 10/19/2025 Commit 2714a91 Epoch 011 | lr 0.010000 | train 1.2425 | val 0.6871 | val_iou 0.6642
+10/21/2025 Commit a3720e1 Epoch 008 | lr 0.010000 | train 1.1224 | val 1.0258 | val_iou 0.4823

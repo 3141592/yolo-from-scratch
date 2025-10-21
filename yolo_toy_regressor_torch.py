@@ -37,6 +37,7 @@ CONFIG = {
 
     # Data & Preprocessing
     "IMAGE_SIZE": 448,                  # Resize to (IMAGE_SIZE, IMAGE_SIZE)
+    "SAMPLE_SIZE": 1200,                # Total images to use
     "MAX_SAMPLES": 1400,                 # Max samples to draw from parquet
     "TRAIN_SPLIT": 0.8,                 # Train/validation split fraction
     "TRAIN_PATH": "/home/roy/src/data/voc2012/train-00000-of-00001.parquet",
@@ -496,7 +497,7 @@ def main():
     )
     train = ds["train"]; val = ds["val"]
 
-    sample_list = [train[i] for i in range(16)]
+    sample_list = [train[i] for i in range(CONFIG["SAMPLE_SIZE"])]
     X, Y = get_samples_from_dataset(sample_list)
 
     # 1) IoU of a box with itself must be ~1.0
