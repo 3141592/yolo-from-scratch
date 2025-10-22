@@ -37,8 +37,8 @@ CONFIG = {
 
     # Data & Preprocessing
     "IMAGE_SIZE": 448,                  # Resize to (IMAGE_SIZE, IMAGE_SIZE)
-    "SAMPLE_SIZE": 1200,                # Total images to use
-    "MAX_SAMPLES": 1400,                 # Max samples to draw from parquet
+    "SAMPLE_SIZE": 32,                # Total images to use
+    "MAX_SAMPLES": 1400,                 # Max samples to draw from parquet, 1424 total
     "TRAIN_SPLIT": 0.8,                 # Train/validation split fraction
     "TRAIN_PATH": "/home/roy/src/data/voc2012/train-00000-of-00001.parquet",
     "VAL_PATH":   "/home/roy/src/data/voc2012/val-00000-of-00001.parquet",
@@ -60,13 +60,15 @@ CONFIG = {
     "OVERFIT_WD": 0.0,
 
     # Training
-    "TOTAL_EPOCHS": 135,
+    "TOTAL_EPOCHS": 60,
     "WARMUP": 5,
     "MAX_GRAD_NORM": 1.0,               # gradient clipping L2 norm
     "EPS": 1e-7,
+    "LOSS_FUNCTION": "YOLOBBoxLoss",         # "YOLOBBoxLoss", "MSELoss"
+    "TRANSFORM": "identity",             # "identity", "sigmoid"
 
     # Optimizer
-    "OPTIMIZER": "AdamW",
+    "OPTIMIZER": "AdamW",               # "AdamW", "SGD"
     "LR": 1e-3,
     "WEIGHT_DECAY": 5e-4,
     "BETAS": (0.9, 0.999),
@@ -76,7 +78,7 @@ CONFIG = {
     "MODE": "min",
     "LR_SCHEDULER": "ReduceLROnPlateau",
     "LR_FACTOR": 0.5,
-    "LR_PATIENCE": 4,
+    "LR_PATIENCE": 10,
     "LR_MIN": 1e-6,
 
     # Early Stopping (maximize val_iou)
@@ -257,7 +259,7 @@ class YOLORegressorModel(nn.Module):
             nn.Flatten(),
             nn.Linear(flat, 4096),
             nn.LeakyReLU(0.1, inplace=True),
-            nn.Dropout(0.5),
+            #nn.Dropout(0.5),
             nn.Linear(4096, 4)  # [xc,yc,w,h]
         )
 
@@ -362,7 +364,7 @@ class YOLOBBoxLoss(nn.Module):
         lambda_wh: float = 5.0,
         lambda_iou: float = 0.0,    # set >0 to add IoU/CIoU penalty
         use_ciou: bool = True,      # if False and lambda_iou>0, uses (1 - IoU)
-        transform: str = "identity",# 'identity' or 'sigmoid'
+        transform: str = CONFIG["TRANSFORM"],# 'identity' or 'sigmoid'
         eps: float = 1e-6,
         reduction: str = "mean",    # 'mean' or 'sum' (per-batch)
     ):
@@ -560,24 +562,36 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = YOLORegressorModel().to(device)
-    #loss_fn = nn.MSELoss()
-    # Example wiring in your script
-    EPS = float(CONFIG.get("EPS", 1e-6))
 
-    loss_fn = YOLOBBoxLoss(
-        lambda_coord=5.0,   # classic value from YOLOv1
-        lambda_wh=5.0,      # keep width/height on similar scale as xy
-        lambda_iou=1.0,     # try 0.5–2.0; set 0.0 to disable
-        use_ciou=True,      # CIoU usually converges faster than plain IoU
-        transform="identity",  # or 'sigmoid' if you want preds squashed to [0,1]
-        eps=EPS,
-        reduction="mean",
-    ).to(device)
+    if CONFIG["LOSS_FUNCTION"] == "MSELoss":
+        loss_fn = nn.MSELoss()
 
-    opt = optim.SGD(model.parameters(), 
-                    lr=CONFIG["LR"], 
-                    momentum=CONFIG["MOMENTUM"], 
-                    weight_decay=CONFIG["WEIGHT_DECAY"])
+    elif CONFIG["LOSS_FUNCTION"] == "YOLOBBoxLoss":
+        EPS = float(CONFIG.get("EPS", 1e-6))
+
+        loss_fn = YOLOBBoxLoss(
+            lambda_coord=1.0,   # classic value from YOLOv1
+            lambda_wh=1.0,      # keep width/height on similar scale as xy
+            lambda_iou=5.0,     # try 0.5–2.0; set 0.0 to disable
+            use_ciou=True,      # CIoU usually converges faster than plain IoU
+            transform=CONFIG["TRANSFORM"],  # or 'sigmoid' if you want preds squashed to [0,1]
+            eps=EPS,
+            reduction="mean",
+        ).to(device)
+
+    if CONFIG["OPTIMIZER"] == "AdamW": 
+        opt = optim.AdamW(model.parameters(), 
+                          lr=CONFIG["LR"], 
+                          weight_decay=CONFIG["WEIGHT_DECAY"], betas=CONFIG["BETAS"])
+        print("OPTIMIZER == AdamW")
+
+    elif CONFIG["OPTIMIZER"] == "SGD": 
+        opt = optim.SGD(model.parameters(), 
+                        lr=CONFIG["LR"], 
+                        momentum=CONFIG["MOMENTUM"], 
+                        weight_decay=CONFIG["WEIGHT_DECAY"])
+        print("OPTIMIZER == SGD")
+
     plateau = optim.lr_scheduler.ReduceLROnPlateau(opt, 
                                                    mode=CONFIG["MODE"], 
                                                    factor=CONFIG["LR_FACTOR"], 

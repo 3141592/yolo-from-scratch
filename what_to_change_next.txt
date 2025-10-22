@@ -22,4 +22,101 @@ Overfit harness: confirm capacity/grad flow by overfitting 1–8 images (batch=1
 
 Loss weights: ensure your λ_coord=5, λ_noobj=0.5 are actually applied, and that IoU is computed on decoded boxes (after sigmoid + scale to cell/image as you intend).
 
-Optimizer details: don’t weight-decay BN/bias; consider AdamW with β2=0.99–0.999; try a slightly higher initial LR (e.g., 2e-2) after you increase steps/epoch.
+Optimizer details: don't weight-decay BN/bias; consider AdamW with β2=0.99–0.999; try a slightly higher initial LR (e.g., 2e-2) after you increase steps/epoch.
+
+================================================================================
+10/22/2025 - Recommendations to Improve IoU from 0.44
+
+CRITICAL ISSUES FOUND:
+1. **Optimizer Mismatch** (yolo_toy_regressor_torch.py:577-580)
+   - Config says "AdamW" but code uses SGD with momentum
+   - Fix: Change to AdamW or update config to match actual optimizer
+   - SGD needs different learning rates than AdamW
+
+2. **Output Range Mismatch** (yolo_toy_regressor_torch.py:261, 567-575)
+   - Model outputs unrestricted values (nn.Linear with no activation)
+   - Targets are normalized to [0,1]
+   - Loss uses transform="identity" so no squashing applied
+   - This can cause training instability and poor convergence
+   - Fix: Either add sigmoid to model output OR use transform="sigmoid" in loss
+   - Consider: torch.sigmoid for xc,yc and F.softplus for w,h might be better
+
+3. **Very Small Batch Size** (CONFIG["BATCH_SIZE"]: 4)
+   - Only 240 steps/epoch with 960 training samples
+   - Causes noisy gradient estimates and unstable training
+   - Fix: Increase to 8 or 16 for more stable gradients
+   - With batch=8: 120 steps/epoch, batch=16: 60 steps/epoch
+
+4. **High Dropout Rate** (yolo_toy_regressor_torch.py:260)
+   - 0.5 dropout is very aggressive for small dataset (1200 samples)
+   - May prevent model from learning complex patterns
+   - Fix: Reduce to 0.2-0.3 or remove entirely for this dataset size
+
+HIGH IMPACT CHANGES:
+5. **Data Augmentation** (currently none)
+   - Add horizontal flips (easy win)
+   - Add small random crops (0.9-1.0 scale)
+   - Add color jitter (brightness, contrast, saturation)
+   - This effectively increases dataset size
+
+6. **Better Output Layer Initialization** (yolo_toy_regressor_torch.py:261)
+   - Final linear layer uses default init
+   - Add custom bias initialization to start near reasonable boxes
+   - Current INIT_BIAS only used in overfit mode
+   - Fix: Apply bias init in main training too
+
+7. **Learning Rate & Schedule** (yolo_toy_regressor_torch.py:420-428, 598-600)
+   - Custom schedule: warmup 5, then 1e-2 for 75, 1e-3 for 30, 1e-4 after
+   - This is rigid and may not suit current setup
+   - Fix: Use cosine annealing or OneCycleLR for better convergence
+   - Alternative: Keep ReduceLROnPlateau but increase patience to 8-10
+
+8. **Loss Function Tuning** (yolo_toy_regressor_torch.py:567-575)
+   - Current: lambda_coord=5.0, lambda_wh=5.0, lambda_iou=1.0
+   - CIoU weight might be too low relative to coordinate loss
+   - Fix: Try lambda_iou=2.0-5.0 to emphasize overlap
+   - Or try: lambda_coord=1.0, lambda_wh=1.0, lambda_iou=5.0
+
+MEDIUM IMPACT CHANGES:
+9. **Add Normalization Layers**
+   - Model uses LeakyReLU but no batch/group normalization
+   - Adding BatchNorm after each conv could help training stability
+   - With small batches, consider GroupNorm instead (batch-size independent)
+
+10. **Gradient Clipping** (currently MAX_GRAD_NORM=1.0)
+    - Might be too restrictive, try 3.0-5.0
+    - Or remove entirely if using Adam/AdamW
+
+11. **Exponential Moving Average (EMA)**
+    - Track EMA of model weights during training
+    - Use EMA weights for validation/inference
+    - Often gives +1-2% IoU improvement for free
+
+12. **Warmup Epochs** (currently WARMUP=5)
+    - Very short for 240 steps/epoch = only 1200 steps
+    - Increase to 10-15 epochs if keeping small batch size
+    - Or increase batch size and keep warmup=5
+
+13. **Early Stopping Patience** (currently 25 epochs)
+    - Quite long, might train too far past optimum
+    - Try reducing to 15-20 epochs
+
+14. **Multi-Scale Training**
+    - Randomly vary input size during training (e.g., 384, 416, 448)
+    - Helps model generalize across scales
+
+SUGGESTED PRIORITY ORDER:
+1. Fix optimizer mismatch (critical bug)
+2. Add sigmoid/transform to outputs (critical for convergence)
+3. Increase batch size to 8-16
+4. Reduce dropout to 0.2-0.3
+5. Add data augmentation (flips at minimum)
+6. Increase lambda_iou to 2.0-5.0
+7. Apply proper bias initialization to final layer
+8. Try cosine annealing LR schedule
+9. Add EMA if training is stable
+10. Add GroupNorm if still struggling
+
+QUICK TEST:
+Run with: batch=8, dropout=0.3, transform="sigmoid" in loss, lambda_iou=3.0
+This should get you past 0.50 IoU if the optimizer is fixed.
