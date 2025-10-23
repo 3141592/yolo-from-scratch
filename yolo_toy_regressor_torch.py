@@ -479,6 +479,17 @@ def main():
             plt.title(f"IoU: {iou_xywh_np(pred, gt):.3f}")
             plt.axis('off'); plt.show()
 
+    # Listing 4.19 Printing the training and validation loss
+    history_dict = history
+    val_loss_values = history_dict["val_iou"]
+    epochs = range(1, len(val_loss_values) + 1)
+    plt.plot(epochs, val_loss_values, "b", label="Val IoU")
+    plt.title("IoU")
+    plt.xlabel("Epochs")
+    plt.ylabel("IoU")
+    plt.legend()
+    plt.show()
+
 
 if __name__ == "__main__":
     main()
