@@ -44,7 +44,7 @@ CONFIG = {
     "VAL_PATH":   "/home/roy/src/data/voc2012/val-00000-of-00001.parquet",
 
     # Dataloader
-    "BATCH_SIZE": 4,
+    "BATCH_SIZE": 8,
     "NUM_WORKERS": 2,
     "PIN_MEMORY": True,
 
