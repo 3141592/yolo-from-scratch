@@ -99,7 +99,7 @@ def main():
 
     dt = datetime.strptime(best["date"], "%Y-%m-%d").strftime("%m/%d/%Y")
     line = (
-        f"{dt} Commit {best.get('commit','NA')} "
+        f"- {dt} Commit {best.get('commit','NA')} "
         f"Epoch {int(best['epoch']):03d} | "
         f"lr {float(best['lr']):.6f} | "
         f"train {float(best['train']):.4f} | "

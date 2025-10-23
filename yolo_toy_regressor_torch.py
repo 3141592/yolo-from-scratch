@@ -28,7 +28,7 @@ from utils.logger_quality import log_quality
 # Global Configuration
 # =======================
 CONFIG = {
-        # Debug / Control
+    # Debug / Control
     "OVERFIT_ONE": False,               # Run 1-image sanity check & exit
     "DEBUG": False,                      # Verbose logs & gradient prints
 
@@ -37,8 +37,8 @@ CONFIG = {
 
     # Data & Preprocessing
     "IMAGE_SIZE": 448,                  # Resize to (IMAGE_SIZE, IMAGE_SIZE)
-    "SAMPLE_SIZE": 32,                # Total images to use
-    "MAX_SAMPLES": 1400,                 # Max samples to draw from parquet, 1424 total
+    "SAMPLE_SIZE": 1024,                # Total images to use
+    "MAX_SAMPLES": 1424,                 # Max samples to draw from parquet, 1424 total
     "TRAIN_SPLIT": 0.8,                 # Train/validation split fraction
     "TRAIN_PATH": "/home/roy/src/data/voc2012/train-00000-of-00001.parquet",
     "VAL_PATH":   "/home/roy/src/data/voc2012/val-00000-of-00001.parquet",
@@ -60,11 +60,11 @@ CONFIG = {
     "OVERFIT_WD": 0.0,
 
     # Training
-    "TOTAL_EPOCHS": 60,
+    "TOTAL_EPOCHS": 135,
     "WARMUP": 5,
     "MAX_GRAD_NORM": 1.0,               # gradient clipping L2 norm
     "EPS": 1e-7,
-    "LOSS_FUNCTION": "YOLOBBoxLoss",         # "YOLOBBoxLoss", "MSELoss"
+    "LOSS_FUNCTION": "MSELoss",         # "YOLOBBoxLoss", "MSELoss"
     "TRANSFORM": "identity",             # "identity", "sigmoid"
 
     # Optimizer
@@ -78,11 +78,11 @@ CONFIG = {
     "MODE": "min",
     "LR_SCHEDULER": "ReduceLROnPlateau",
     "LR_FACTOR": 0.5,
-    "LR_PATIENCE": 10,
+    "LR_PATIENCE": 4,
     "LR_MIN": 1e-6,
 
     # Early Stopping (maximize val_iou)
-    "EARLY_PATIENCE": 25,
+    "EARLY_PATIENCE": 15,
     "EARLY_MIN_DELTA": 0.0,
 
     # Checkpoint
@@ -210,7 +210,7 @@ def Conv2D(in_ch, out_ch, k, s=1):
         nn.LeakyReLU(0.1, inplace=True),
     )
 
-class YOLORegressorModel(nn.Module):
+class YoloRegressorModel(nn.Module):
     def __init__(self):
         super().__init__()
         pool = lambda: nn.MaxPool2d(kernel_size=2, stride=2)
@@ -259,7 +259,7 @@ class YOLORegressorModel(nn.Module):
             nn.Flatten(),
             nn.Linear(flat, 4096),
             nn.LeakyReLU(0.1, inplace=True),
-            nn.Dropout(0.5),
+            nn.Dropout(0.2),
             nn.Linear(4096, 4)  # [xc,yc,w,h]
         )
 
@@ -267,156 +267,6 @@ class YOLORegressorModel(nn.Module):
         x = self.feat(x)
         x = self.fc(x)
         return x
-
-# Custom Loss Function Based on YOLO paper
-def bbox_iou_xywh(pred, target, eps=1e-6):
-    """
-    IoU for (x_center, y_center, w, h) boxes in normalized coordinates.
-    pred, target: (N, 4)
-    Returns iou: (N,)
-    """
-    px, py, pw, ph = pred.unbind(dim=1)
-    tx, ty, tw, th = target.unbind(dim=1)
-
-    # Convert to (x1, y1, x2, y2)
-    p_x1 = px - pw * 0.5
-    p_y1 = py - ph * 0.5
-    p_x2 = px + pw * 0.5
-    p_y2 = py + ph * 0.5
-
-    t_x1 = ty*0  # just to please linters; we reassign below
-    t_x1 = tx - tw * 0.5
-    t_y1 = ty - th * 0.5
-    t_x2 = tx + tw * 0.5
-    t_y2 = ty + th * 0.5
-
-    # Intersection
-    inter_x1 = torch.maximum(p_x1, t_x1)
-    inter_y1 = torch.maximum(p_y1, t_y1)
-    inter_x2 = torch.minimum(p_x2, t_x2)
-    inter_y2 = torch.minimum(p_y2, t_y2)
-
-    inter_w = (inter_x2 - inter_x1).clamp(min=0)
-    inter_h = (inter_y2 - inter_y1).clamp(min=0)
-    inter_area = inter_w * inter_h
-
-    p_area = (p_x2 - p_x1).clamp_min(0) * (p_y2 - p_y1).clamp_min(0)
-    t_area = (t_x2 - t_x1).clamp_min(0) * (t_y2 - t_y1).clamp_min(0)
-    union = (p_area + t_area - inter_area).clamp_min(eps)
-
-    return inter_area / union
-
-
-def bbox_ciou_xywh(pred, target, eps=1e-6):
-    """
-    CIoU for (x_center, y_center, w, h) boxes (normalized).
-    Returns ciou: (N,)
-    """
-    iou = bbox_iou_xywh(pred, target, eps=eps)
-
-    px, py, pw, ph = pred.unbind(dim=1)
-    tx, ty, tw, th = target.unbind(dim=1)
-
-    # center distance
-    center_dist = (px - tx) ** 2 + (py - ty) ** 2
-
-    # smallest enclosing box diagonal squared
-    p_x1 = px - pw * 0.5
-    p_y1 = py - ph * 0.5
-    p_x2 = px + pw * 0.5
-    p_y2 = py + ph * 0.5
-    t_x1 = tx - tw * 0.5
-    t_y1 = ty - th * 0.5
-    t_x2 = tx + tw * 0.5
-    t_y2 = ty + th * 0.5
-
-    c_x1 = torch.minimum(p_x1, t_x1)
-    c_y1 = torch.minimum(p_y1, t_y1)
-    c_x2 = torch.maximum(p_x2, t_x2)
-    c_y2 = torch.maximum(p_y2, t_y2)
-
-    cw = (c_x2 - c_x1).clamp_min(eps)
-    ch = (c_y2 - c_y1).clamp_min(eps)
-    c2 = cw**2 + ch**2  # diagonal^2
-    d = center_dist / c2.clamp_min(eps)
-
-    # aspect ratio consistency
-    v = (4 / (torch.pi ** 2)) * torch.pow(
-        torch.atan((tw / th).clamp_min(eps)) - torch.atan((pw / ph).clamp_min(eps)), 2
-    )
-    with torch.no_grad():
-        alpha = v / (1 - iou + v + eps)
-
-    ciou = iou - (d + alpha * v)
-    return ciou
-
-
-class YOLOBBoxLoss(nn.Module):
-    """
-    YOLOv1-style box loss with optional IoU/CIoU term.
-
-    Assumes preds and targets are shaped (N, 4) in normalized [0,1] xywh.
-    If your model outputs unconstrained values, set transform='sigmoid' to squash preds to [0,1] inside the loss.
-    """
-    def __init__(
-        self,
-        lambda_coord: float = 5.0,
-        lambda_wh: float = 5.0,
-        lambda_iou: float = 0.0,    # set >0 to add IoU/CIoU penalty
-        use_ciou: bool = True,      # if False and lambda_iou>0, uses (1 - IoU)
-        transform: str = "identity",# 'identity' or 'sigmoid'
-        eps: float = 1e-6,
-        reduction: str = "mean",    # 'mean' or 'sum' (per-batch)
-    ):
-        super().__init__()
-        assert reduction in ("mean", "sum")
-        assert transform in ("identity", "sigmoid")
-        self.lambda_coord = float(lambda_coord)
-        self.lambda_wh = float(lambda_wh)
-        self.lambda_iou = float(lambda_iou)
-        self.use_ciou = bool(use_ciou)
-        self.transform = transform
-        self.eps = float(eps)
-        self.reduction = reduction
-
-    def forward(self, preds: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        preds, targets: (N, 4) as [xc, yc, w, h] normalized to image size.
-        """
-        if self.transform == "sigmoid":
-            preds = preds.sigmoid()
-
-        px, py, pw, ph = preds.unbind(dim=1)
-        tx, ty, tw, th = targets.unbind(dim=1)
-
-        # YOLOv1 coordinate loss:
-        #   lambda_coord * [(x-x̂)^2 + (y-ŷ)^2 + (sqrt(w)-sqrt(ŵ))^2 + (sqrt(h)-sqrt(ĥ))^2]
-        # sqrt terms stabilize large-box errors
-        sqrt_pw = torch.sqrt(pw.clamp_min(self.eps))
-        sqrt_ph = torch.sqrt(ph.clamp_min(self.eps))
-        sqrt_tw = torch.sqrt(tw.clamp_min(self.eps))
-        sqrt_th = torch.sqrt(th.clamp_min(self.eps))
-
-        xy_term = (px - tx) ** 2 + (py - ty) ** 2
-        wh_term = (sqrt_pw - sqrt_tw) ** 2 + (sqrt_ph - sqrt_th) ** 2
-
-        coord_loss = self.lambda_coord * xy_term + self.lambda_wh * wh_term  # (N,)
-
-        # Optional IoU/CIoU penalty to encourage overlap/shape agreement
-        if self.lambda_iou > 0.0:
-            if self.use_ciou:
-                overlap = bbox_ciou_xywh(preds, targets, eps=self.eps)  # (N,)
-            else:
-                overlap = bbox_iou_xywh(preds, targets, eps=self.eps)   # (N,)
-            iou_loss = self.lambda_iou * (1.0 - overlap)                 # (N,)
-            total = coord_loss + iou_loss
-        else:
-            total = coord_loss
-
-        if self.reduction == "mean":
-            return total.mean()
-        else:
-            return total.sum()
 
 # ---------- Training / Eval ----------
 def yolo_v1_lr_schedule(epoch, total_epochs=CONFIG["TOTAL_EPOCHS"], warmup=CONFIG["WARMUP"]):
@@ -499,46 +349,8 @@ def main():
     )
     train = ds["train"]; val = ds["val"]
 
-    sample_list = [train[i] for i in range(CONFIG["SAMPLE_SIZE"])]
+    sample_list = [train[i] for i in range(16)]
     X, Y = get_samples_from_dataset(sample_list)
-
-    # 1) IoU of a box with itself must be ~1.0
-    with torch.no_grad():
-        y_t = torch.tensor(Y[:4], dtype=torch.float32)  # first few ground-truth boxes
-        iou_self = bbox_iou_xywh(y_t, y_t).mean().item()
-        print("[sanity] IoU(Y, Y) =", iou_self)  # expect ~1.0
-
-    # 2) Small jitter should still give a positive IoU
-    delta = torch.tensor([[0.02, -0.01, 0.0, 0.0]]).repeat(y_t.size(0), 1)  # small center shift
-    iou_jitter = bbox_iou_xywh(y_t + delta, y_t).mean().item()
-    print("[sanity] IoU(Y+tiny_shift, Y) =", iou_jitter)  # expect ~0.7–0.95 depending on sizes
-
-    # 3) Check metric geometry after transforms
-    px, py, pw, ph = y_t.unbind(1)
-    pw_t = F.softplus(pw) + 1e-6
-    ph_t = F.softplus(ph) + 1e-6
-    print("[sanity] post-transform w/h min/max:",
-          pw_t.min().item(), pw_t.max().item(),
-          ph_t.min().item(), ph_t.max().item())
-
-    # Sanity check: confirm target boxes are normalized to [0,1]
-    print("\n[Sanity check] Target value ranges (expected ~0-1)")
-    print("shape:", Y.shape)
-
-    x_min, x_max = Y[:, 0].min().item(), Y[:, 0].max().item()
-    y_min, y_max = Y[:, 1].min().item(), Y[:, 1].max().item()
-    w_min, w_max = Y[:, 2].min().item(), Y[:, 2].max().item()
-    h_min, h_max = Y[:, 3].min().item(), Y[:, 3].max().item()
-
-    print(f"x range: {x_min:.3f} – {x_max:.3f}")
-    print(f"y range: {y_min:.3f} – {y_max:.3f}")
-    print(f"w range: {w_min:.3f} – {w_max:.3f}")
-    print(f"h range: {h_min:.3f} – {h_max:.3f}")
-
-    # Quick sample print
-    print("\nFirst 3 target boxes:")
-    print(Y[:3])
-
     idx = int(CONFIG["TRAIN_SPLIT"]*len(X))
     X_tr, Y_tr = X[:idx], Y[:idx]
     X_va, Y_va = X[idx:], Y[idx:]
@@ -550,40 +362,27 @@ def main():
     Y_va_t = torch.from_numpy(Y_va).contiguous()
 
     train_loader = DataLoader(TensorDataset(X_tr_t, Y_tr_t),
-                              batch_size=CONFIG["BATCH_SIZE"], 
-                              shuffle=True, 
-                              num_workers=CONFIG["NUM_WORKERS"], 
+                              batch_size=CONFIG["BATCH_SIZE"],
+                              shuffle=True,
+                              num_workers=CONFIG["NUM_WORKERS"],
                               pin_memory=CONFIG["PIN_MEMORY"])
-    val_loader   = DataLoader(TensorDataset(X_va_t, Y_va_t), 
-                              batch_size=CONFIG["BATCH_SIZE"], 
-                              shuffle=False, 
-                              num_workers=CONFIG["NUM_WORKERS"], 
+    val_loader   = DataLoader(TensorDataset(X_va_t, Y_va_t),
+                              batch_size=CONFIG["BATCH_SIZE"],
+                              shuffle=False,
+                              num_workers=CONFIG["NUM_WORKERS"],
                               pin_memory=CONFIG["PIN_MEMORY"])
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = YOLORegressorModel().to(device)
-    #loss_fn = nn.MSELoss()
-    # Example wiring in your script
-    EPS = float(CONFIG.get("EPS", 1e-6))
-
-    loss_fn = YOLOBBoxLoss(
-        lambda_coord=5.0,   # classic value from YOLOv1
-        lambda_wh=5.0,      # keep width/height on similar scale as xy
-        lambda_iou=1.0,     # try 0.5–2.0; set 0.0 to disable
-        use_ciou=True,      # CIoU usually converges faster than plain IoU
-        transform="identity",  # or 'sigmoid' if you want preds squashed to [0,1]
-        eps=EPS,
-        reduction="mean",
-    ).to(device)
-
-    opt = optim.SGD(model.parameters(), 
-                    lr=CONFIG["LR"], 
-                    momentum=CONFIG["MOMENTUM"], 
+    model = YoloRegressorModel().to(device)
+    loss_fn = nn.MSELoss()
+    opt = optim.SGD(model.parameters(),
+                    lr=CONFIG["LR"],
+                    momentum=CONFIG["MOMENTUM"],
                     weight_decay=CONFIG["WEIGHT_DECAY"])
-    plateau = optim.lr_scheduler.ReduceLROnPlateau(opt, 
-                                                   mode=CONFIG["MODE"], 
-                                                   factor=CONFIG["LR_FACTOR"], 
-                                                   patience=CONFIG["LR_PATIENCE"], 
+    plateau = optim.lr_scheduler.ReduceLROnPlateau(opt,
+                                                   mode=CONFIG["MODE"],
+                                                   factor=CONFIG["LR_FACTOR"],
+                                                   patience=CONFIG["LR_PATIENCE"],
                                                    min_lr=CONFIG["LR_MIN"])
     scaler = torch.amp.GradScaler(enabled=torch.cuda.is_available())
 
