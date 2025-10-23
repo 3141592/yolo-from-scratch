@@ -166,16 +166,18 @@ Epoch 005 | lr 0.003000 | train 0.0263 | val 0.0259 | val_iou 0.3636
 Epoch 005 | lr 0.010000 | train 0.0232 | val 0.0138 | val_iou 0.5583
 
 ## Progress
-10/13/2025 Commit 2b2b228 Epoch 004 | lr 0.000100 | train 1.3799 | val 0.9911 | val_iou 0.2160
-10/14/2025 Commit 71e6690 Epoch 004 | lr 0.003000 | train 2.5890 | val 2.4107 | val_iou 0.1234
-10/16/2025 Commit e6cd027 Epoch 004 | lr 0.010000 | train 0.0225 | val 0.0135 | val_iou 0.5587
-10/16/2025 Commit c49958b Epoch 004 | lr 0.010000 | train 0.0261 | val 0.0141 | val_iou 0.5523
-10/18/2025 10/18/2025 Commit f06afb5 Epoch 010 | lr 0.010000 | train 0.0476 | val 0.0254 | val_iou 0.6093
-10/18/2025 Commit a9e7477 Epoch 012 | lr 0.010000 | train 0.0564 | val 0.0255 | val_iou 0.6033
-10/18/2025 Commit 96cf66a Epoch 034 | lr 0.010000 | train 0.0502 | val 0.0254 | val_iou 0.5984
-10/19/2025 Commit b98748a Epoch 057 | lr 0.002710 | train 0.0416 | val 0.0308 | val_iou 0.5129
-10/19/2025 Commit 1aa992a Epoch 012 | lr 0.010000 | train 0.0535 | val 0.0257 | val_iou 0.6041
-10/19/2025 Commit 2714a91 Epoch 011 | lr 0.010000 | train 1.2425 | val 0.6871 | val_iou 0.6642
-10/21/2025 Commit a3720e1 Epoch 008 | lr 0.010000 | train 1.1224 | val 1.0258 | val_iou 0.4823
-10/19/2025 Commit 2714a91 Epoch 011 | lr 0.010000 | train 1.2425 | val 0.6871 | val_iou 0.6642
-10/21/2025 10/21/2025 Commit 59599cd Epoch 009 | lr 0.010000 | train 1.4127 | val 1.5773 | val_iou 0.5051
+- 10/13/2025 Commit 2b2b228 Epoch 004 | lr 0.000100 | train 1.3799 | val 0.9911 | val_iou 0.2160
+- 10/14/2025 Commit 71e6690 Epoch 004 | lr 0.003000 | train 2.5890 | val 2.4107 | val_iou 0.1234
+- 10/16/2025 Commit e6cd027 Epoch 004 | lr 0.010000 | train 0.0225 | val 0.0135 | val_iou 0.5587
+- 10/16/2025 Commit c49958b Epoch 004 | lr 0.010000 | train 0.0261 | val 0.0141 | val_iou 0.5523
+- 10/18/2025 10/18/2025 Commit f06afb5 Epoch 010 | lr 0.010000 | train 0.0476 | val 0.0254 | val_iou 0.6093
+- 10/18/2025 Commit a9e7477 Epoch 012 | lr 0.010000 | train 0.0564 | val 0.0255 | val_iou 0.6033
+- 10/18/2025 Commit 96cf66a Epoch 034 | lr 0.010000 | train 0.0502 | val 0.0254 | val_iou 0.5984
+- 10/19/2025 Commit b98748a Epoch 057 | lr 0.002710 | train 0.0416 | val 0.0308 | val_iou 0.5129
+- 10/19/2025 Commit 1aa992a Epoch 012 | lr 0.010000 | train 0.0535 | val 0.0257 | val_iou 0.6041
+- 10/19/2025 Commit 2714a91 Epoch 011 | lr 0.010000 | train 1.2425 | val 0.6871 | val_iou 0.6642
+- 10/21/2025 Commit a3720e1 Epoch 008 | lr 0.010000 | train 1.1224 | val 1.0258 | val_iou 0.4823
+- 10/19/2025 Commit 2714a91 Epoch 011 | lr 0.010000 | train 1.2425 | val 0.6871 | val_iou 0.6642
+- 10/21/2025 10/21/2025 Commit 59599cd Epoch 009 | lr 0.010000 | train 1.4127 | val 1.5773 | val_iou 0.5051
+- 10/19/2025 Commit 2714a91 Epoch 011 | lr 0.010000 | train 1.2425 | val 0.6871 | val_iou 0.6642
+- 10/22/2025 Commit 461b496 Epoch 010 | lr 0.010000 | train 1.0476 | val 0.7868 | val_iou 0.5041
