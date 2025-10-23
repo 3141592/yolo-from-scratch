@@ -28,7 +28,7 @@ from utils.logger_quality import log_quality
 # Global Configuration
 # =======================
 CONFIG = {
-    # Debug / Control
+        # Debug / Control
     "OVERFIT_ONE": False,               # Run 1-image sanity check & exit
     "DEBUG": False,                      # Verbose logs & gradient prints
 
@@ -37,8 +37,8 @@ CONFIG = {
 
     # Data & Preprocessing
     "IMAGE_SIZE": 448,                  # Resize to (IMAGE_SIZE, IMAGE_SIZE)
-    "SAMPLE_SIZE": 1200,                # Total images to use
-    "MAX_SAMPLES": 1400,                 # Max samples to draw from parquet
+    "SAMPLE_SIZE": 32,                # Total images to use
+    "MAX_SAMPLES": 1400,                 # Max samples to draw from parquet, 1424 total
     "TRAIN_SPLIT": 0.8,                 # Train/validation split fraction
     "TRAIN_PATH": "/home/roy/src/data/voc2012/train-00000-of-00001.parquet",
     "VAL_PATH":   "/home/roy/src/data/voc2012/val-00000-of-00001.parquet",
@@ -60,13 +60,15 @@ CONFIG = {
     "OVERFIT_WD": 0.0,
 
     # Training
-    "TOTAL_EPOCHS": 135,
+    "TOTAL_EPOCHS": 60,
     "WARMUP": 5,
     "MAX_GRAD_NORM": 1.0,               # gradient clipping L2 norm
     "EPS": 1e-7,
+    "LOSS_FUNCTION": "YOLOBBoxLoss",         # "YOLOBBoxLoss", "MSELoss"
+    "TRANSFORM": "identity",             # "identity", "sigmoid"
 
     # Optimizer
-    "OPTIMIZER": "AdamW",
+    "OPTIMIZER": "AdamW",               # "AdamW", "SGD"
     "LR": 1e-3,
     "WEIGHT_DECAY": 5e-4,
     "BETAS": (0.9, 0.999),
@@ -76,7 +78,7 @@ CONFIG = {
     "MODE": "min",
     "LR_SCHEDULER": "ReduceLROnPlateau",
     "LR_FACTOR": 0.5,
-    "LR_PATIENCE": 4,
+    "LR_PATIENCE": 10,
     "LR_MIN": 1e-6,
 
     # Early Stopping (maximize val_iou)
